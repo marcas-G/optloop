@@ -65,6 +65,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sync_template": True,
         "copy_user_settings": True,
         "overwrite_user_settings": True,
+        "copy_user_auth": True,
+        "overwrite_user_auth": False,
     },
     "execution": {
         "mode": "docker",
@@ -254,6 +256,36 @@ def detect_host_claude_settings_path() -> Optional[Path]:
     return None
 
 
+def detect_host_claude_auth_files() -> Dict[str, Path]:
+    home = Path.home()
+    auth_names = [
+        ".credentials.json",
+        "credentials.json",
+        "auth.json",
+    ]
+    files: Dict[str, Path] = {}
+    for name in auth_names:
+        path = home / ".claude" / name
+        if path.exists() and path.is_file():
+            files[name] = path.resolve()
+    return files
+
+
+def copy_user_auth_into_runtime(repo: Path, overwrite: bool = False) -> None:
+    paths = state_paths(repo)
+    auth_files = detect_host_claude_auth_files()
+    if not auth_files:
+        return
+
+    runtime_claude_dir = paths["runtime_claude_dir"]
+    runtime_claude_dir.mkdir(parents=True, exist_ok=True)
+    for name, source in auth_files.items():
+        target = runtime_claude_dir / name
+        if target.exists() and not overwrite:
+            continue
+        shutil.copy2(source, target)
+
+
 def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> None:
     paths = state_paths(repo)
     paths["runtime_root"].mkdir(parents=True, exist_ok=True)
@@ -270,6 +302,11 @@ def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> Non
         copy_user_settings_into_runtime(
             repo,
             overwrite=runtime_cfg.get("overwrite_user_settings", True),
+        )
+    if runtime_cfg.get("copy_user_auth", True):
+        copy_user_auth_into_runtime(
+            repo,
+            overwrite=runtime_cfg.get("overwrite_user_auth", False),
         )
 
 
@@ -494,6 +531,16 @@ def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
         if value:
             values[name] = value
     return values
+
+
+def passthrough_env_presence(cfg: Dict[str, Any]) -> Dict[str, bool]:
+    presence: Dict[str, bool] = {}
+    for key in cfg.get("execution", {}).get("passthrough_env", []):
+        name = str(key).strip()
+        if not name:
+            continue
+        presence[name] = bool(os.environ.get(name))
+    return presence
 
 
 def run(
@@ -1349,6 +1396,8 @@ def cmd_doctor(repo: Path) -> None:
     runtime_names = runtime_container_names(repo, cfg)
     docker_visible = docker_available()
     runtime_states = {name: docker_container_state(name) for name in runtime_names}
+    env_presence = passthrough_env_presence(cfg)
+    host_auth_files = sorted(detect_host_claude_auth_files().keys())
     if docker_visible:
         worker_states = {name: probe_claude_worker(repo, name) for name in runtime_names}
     else:
@@ -1380,6 +1429,8 @@ def cmd_doctor(repo: Path) -> None:
         "claude_command": claude_command(cfg),
         "claude_skip_permissions": claude_skip_permissions(cfg),
         "claude_restart_delay_sec": claude_restart_delay_sec(cfg),
+        "passthrough_env_present": env_presence,
+        "host_auth_files_detected": host_auth_files,
         "container_workers": worker_states,
         "worker_image": cfg["execution"].get("image"),
         "worker_image_present": docker_image_exists(str(cfg["execution"].get("image"))),
