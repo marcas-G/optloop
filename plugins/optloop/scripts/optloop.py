@@ -75,6 +75,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "auto_start_claude": True,
         "claude_command": "claude",
         "claude_skip_permissions": True,
+        "auth_precheck_mode": "warn",
         "claude_restart_delay_sec": 15,
         "claude_prompt": "",
         "network_mode": "bridge",
@@ -87,7 +88,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "mount_host_claude_dir": False,
         "settings_host_path": "",
         "settings_container_path": "/opt/optloop-home/.claude/settings.json",
-        "passthrough_env": ["ANTHROPIC_API_KEY"],
+        "passthrough_env": [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "API_TIMEOUT_MS",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+        ],
         "extra_run_args": [],
     },
     "scaffold": {
@@ -334,41 +347,97 @@ def resolve_host_claude_dir(cfg: Optional[Dict[str, Any]] = None) -> Optional[Pa
     return None
 
 
-def extract_anthropic_api_key_from_settings(settings_path: Optional[Path]) -> Optional[str]:
+def load_settings_json(settings_path: Optional[Path]) -> Any:
     if settings_path is None:
         return None
     try:
-        data = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+        return json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
 
-    key_names = {"anthropic_api_key", "anthropicapikey", "api_key", "apikey"}
 
-    def walk(node: Any) -> Optional[str]:
-        if isinstance(node, dict):
-            env_block = node.get("env")
-            if isinstance(env_block, dict):
-                value = env_block.get("ANTHROPIC_API_KEY") or env_block.get("anthropic_api_key")
+def extract_settings_env_values(settings_path: Optional[Path]) -> Dict[str, str]:
+    data = load_settings_json(settings_path)
+    if not isinstance(data, dict):
+        return {}
+    env_block = data.get("env")
+    if not isinstance(env_block, dict):
+        return {}
+
+    values: Dict[str, str] = {}
+    for k, v in env_block.items():
+        name = str(k).strip()
+        if not name:
+            continue
+        if isinstance(v, str):
+            value = v.strip()
+        elif isinstance(v, (int, float, bool)):
+            value = str(v).strip()
+        else:
+            continue
+        if not value:
+            continue
+        values[name] = value
+    return values
+
+
+def _extract_setting_value_by_keys(
+    data: Any,
+    env_keys: list[str],
+    normalized_keys: set[str],
+    exact_upper_keys: set[str],
+) -> Optional[str]:
+    if isinstance(data, dict):
+        env_block = data.get("env")
+        if isinstance(env_block, dict):
+            for env_key in env_keys:
+                value = env_block.get(env_key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
-            for k, v in node.items():
-                key_norm = str(k).strip().replace("-", "_").lower()
-                if key_norm in key_names or str(k).strip().upper() == "ANTHROPIC_API_KEY":
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
-                found = walk(v)
-                if found:
-                    return found
-            return None
-        if isinstance(node, list):
-            for item in node:
-                found = walk(item)
-                if found:
-                    return found
-            return None
+                if isinstance(value, (int, float, bool)):
+                    text = str(value).strip()
+                    if text:
+                        return text
+        for k, v in data.items():
+            key_text = str(k).strip()
+            key_norm = key_text.replace("-", "_").lower()
+            if key_norm in normalized_keys or key_text.upper() in exact_upper_keys:
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+                if isinstance(v, (int, float, bool)):
+                    text = str(v).strip()
+                    if text:
+                        return text
+            found = _extract_setting_value_by_keys(v, env_keys, normalized_keys, exact_upper_keys)
+            if found:
+                return found
         return None
+    if isinstance(data, list):
+        for item in data:
+            found = _extract_setting_value_by_keys(item, env_keys, normalized_keys, exact_upper_keys)
+            if found:
+                return found
+    return None
 
-    return walk(data)
+
+def extract_anthropic_api_key_from_settings(settings_path: Optional[Path]) -> Optional[str]:
+    data = load_settings_json(settings_path)
+    return _extract_setting_value_by_keys(
+        data,
+        env_keys=["ANTHROPIC_API_KEY", "anthropic_api_key"],
+        normalized_keys={"anthropic_api_key", "anthropicapikey", "api_key", "apikey"},
+        exact_upper_keys={"ANTHROPIC_API_KEY"},
+    )
+
+
+def extract_anthropic_auth_token_from_settings(settings_path: Optional[Path]) -> Optional[str]:
+    data = load_settings_json(settings_path)
+    return _extract_setting_value_by_keys(
+        data,
+        env_keys=["ANTHROPIC_AUTH_TOKEN", "anthropic_auth_token"],
+        normalized_keys={"anthropic_auth_token", "anthropicauthtoken", "auth_token", "token"},
+        exact_upper_keys={"ANTHROPIC_AUTH_TOKEN"},
+    )
 
 
 def detect_host_auth_artifacts() -> list[Path]:
@@ -692,6 +761,14 @@ def claude_restart_delay_sec(cfg: Dict[str, Any]) -> int:
     return positive_int(execution.get("claude_restart_delay_sec", 15), default=15, minimum=1, maximum=3600)
 
 
+def auth_precheck_mode(cfg: Dict[str, Any]) -> str:
+    execution = cfg.get("execution", {})
+    mode = str(execution.get("auth_precheck_mode", "warn")).strip().lower()
+    if mode not in {"strict", "warn", "off"}:
+        return "warn"
+    return mode
+
+
 def claude_prompt_text(cfg: Dict[str, Any]) -> str:
     execution = cfg.get("execution", {})
     override = str(execution.get("claude_prompt", "")).strip()
@@ -712,6 +789,8 @@ def runtime_container_names(repo: Path, cfg: Dict[str, Any]) -> list[str]:
 def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
     settings_path = resolve_settings_host_path(cfg)
     settings_api_key = extract_anthropic_api_key_from_settings(settings_path)
+    settings_auth_token = extract_anthropic_auth_token_from_settings(settings_path)
+    settings_env_values = extract_settings_env_values(settings_path)
     values: Dict[str, str] = {}
     for key in cfg.get("execution", {}).get("passthrough_env", []):
         name = str(key).strip()
@@ -721,8 +800,14 @@ def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
         if value:
             values[name] = value
             continue
+        if name in settings_env_values and settings_env_values[name]:
+            values[name] = settings_env_values[name]
+            continue
         if name == "ANTHROPIC_API_KEY" and settings_api_key:
             values[name] = settings_api_key
+            continue
+        if name == "ANTHROPIC_AUTH_TOKEN" and settings_auth_token:
+            values[name] = settings_auth_token
     return values
 
 
@@ -740,6 +825,8 @@ def passthrough_env_presence(cfg: Dict[str, Any]) -> Dict[str, bool]:
 def passthrough_env_sources(cfg: Dict[str, Any]) -> Dict[str, str]:
     settings_path = resolve_settings_host_path(cfg)
     settings_api_key = extract_anthropic_api_key_from_settings(settings_path)
+    settings_auth_token = extract_anthropic_auth_token_from_settings(settings_path)
+    settings_env_values = extract_settings_env_values(settings_path)
     sources: Dict[str, str] = {}
     for key in cfg.get("execution", {}).get("passthrough_env", []):
         name = str(key).strip()
@@ -748,7 +835,13 @@ def passthrough_env_sources(cfg: Dict[str, Any]) -> Dict[str, str]:
         if os.environ.get(name):
             sources[name] = "environment"
             continue
+        if name in settings_env_values and settings_env_values[name]:
+            sources[name] = "settings_env"
+            continue
         if name == "ANTHROPIC_API_KEY" and settings_api_key:
+            sources[name] = "settings_file"
+            continue
+        if name == "ANTHROPIC_AUTH_TOKEN" and settings_auth_token:
             sources[name] = "settings_file"
             continue
         sources[name] = "missing"
@@ -995,6 +1088,7 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
     command = claude_command(cfg)
     restart_delay = claude_restart_delay_sec(cfg)
     skip_permissions = "1" if claude_skip_permissions(cfg) else "0"
+    precheck_mode = auth_precheck_mode(cfg)
 
     pid_host = worker_pid_host_path(repo, container_name)
     pid_host.parent.mkdir(parents=True, exist_ok=True)
@@ -1030,7 +1124,8 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "    fi\n"
         "    AUTH_READY=0\n"
         "    if [ -n \"${ANTHROPIC_API_KEY:-}\" ]; then AUTH_READY=1; fi\n"
-        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -f \"$HOME/.claude/settings.json\" ] && grep -qiE 'anthropic[_-]*api[_-]*key' \"$HOME/.claude/settings.json\" 2>/dev/null; then AUTH_READY=1; fi\n"
+        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -n \"${ANTHROPIC_AUTH_TOKEN:-}\" ]; then AUTH_READY=1; fi\n"
+        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -f \"$HOME/.claude/settings.json\" ] && grep -qiE 'anthropic[_-]*(api[_-]*key|auth[_-]*token)' \"$HOME/.claude/settings.json\" 2>/dev/null; then AUTH_READY=1; fi\n"
         "    if [ \"$AUTH_READY\" -ne 1 ]; then\n"
         "      for AUTH_DIR in \"$HOME/.claude\" \"$HOME/.config/claude\" \"$HOME/.config/claude-code\" \"$HOME/.config/@anthropic-ai/claude-code\"; do\n"
         "        if [ -d \"$AUTH_DIR\" ] && find \"$AUTH_DIR\" -maxdepth 4 -type f \\( -name '*auth*.json' -o -name '*credential*.json' -o -name '*token*.json' \\) | grep -q .; then\n"
@@ -1040,9 +1135,14 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "      done\n"
         "    fi\n"
         "    if [ \"$AUTH_READY\" -ne 1 ]; then\n"
-        "      echo \"[$TS] auth_missing container=$OPTLOOP_WORKER_CONTAINER hint='set ANTHROPIC_API_KEY, provide settings.json key, or run /login in this runtime home'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
-        "      sleep 60\n"
-        "      continue\n"
+        "      if [ \"$OPTLOOP_AUTH_PRECHECK_MODE\" = \"strict\" ]; then\n"
+        "        echo \"[$TS] auth_missing container=$OPTLOOP_WORKER_CONTAINER hint='credentials unavailable; strict precheck blocks execution'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "        sleep 60\n"
+        "        continue\n"
+        "      fi\n"
+        "      if [ \"$OPTLOOP_AUTH_PRECHECK_MODE\" = \"warn\" ]; then\n"
+        "        echo \"[$TS] auth_precheck_unmet container=$OPTLOOP_WORKER_CONTAINER hint='proceeding without hard auth precheck'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      fi\n"
         "    fi\n"
         "    if ! command -v \"$OPTLOOP_CLAUDE_COMMAND\" >/dev/null 2>&1; then\n"
         "      echo \"[$TS] missing_claude_command container=$OPTLOOP_WORKER_CONTAINER cmd=$OPTLOOP_CLAUDE_COMMAND\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
@@ -1067,7 +1167,7 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "    TS_END=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
         "    echo \"[$TS_END] cycle_end container=$OPTLOOP_WORKER_CONTAINER exit_code=$RC\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
         "    if [ \"$RC\" -ne 0 ] && tail -n 80 \"$OPTLOOP_WORKER_LOGFILE\" | grep -qi 'not logged in'; then\n"
-        "      echo \"[$TS_END] auth_required container=$OPTLOOP_WORKER_CONTAINER hint='run /login or set ANTHROPIC_API_KEY'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      echo \"[$TS_END] auth_required container=$OPTLOOP_WORKER_CONTAINER hint='provide credentials required by current model provider or run /login'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
         "      sleep 60\n"
         "      continue\n"
         "    fi\n"
@@ -1098,6 +1198,8 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         f"OPTLOOP_CLAUDE_RESTART_DELAY_SEC={restart_delay}",
         "-e",
         f"OPTLOOP_CLAUDE_SKIP_PERMISSIONS={skip_permissions}",
+        "-e",
+        f"OPTLOOP_AUTH_PRECHECK_MODE={precheck_mode}",
         "-e",
         "CLAUDE_PROJECT_DIR=/workspace",
     ]
@@ -1627,6 +1729,8 @@ def cmd_doctor(repo: Path) -> None:
     effective_settings = resolve_settings_host_path(cfg)
     effective_host_claude_dir = resolve_host_claude_dir(cfg)
     settings_key_present = bool(extract_anthropic_api_key_from_settings(effective_settings))
+    settings_auth_token_present = bool(extract_anthropic_auth_token_from_settings(effective_settings))
+    settings_env_keys = sorted(extract_settings_env_values(effective_settings).keys())
     host_auth_files = sorted(detect_host_claude_auth_files().keys())
     runtime_auth_files = sorted([str(p.relative_to(paths["runtime_home"])) for p in paths["runtime_home"].rglob("*auth*.json")] +
                                 [str(p.relative_to(paths["runtime_home"])) for p in paths["runtime_home"].rglob("*credential*.json")])
@@ -1661,12 +1765,15 @@ def cmd_doctor(repo: Path) -> None:
         "auto_start_claude": auto_start_claude(cfg),
         "claude_command": claude_command(cfg),
         "claude_skip_permissions": claude_skip_permissions(cfg),
+        "auth_precheck_mode": auth_precheck_mode(cfg),
         "claude_restart_delay_sec": claude_restart_delay_sec(cfg),
         "passthrough_env_present": env_presence,
         "passthrough_env_sources": env_sources,
         "settings_host_path_effective": str(effective_settings) if effective_settings else "",
         "host_claude_dir_effective": str(effective_host_claude_dir) if effective_host_claude_dir else "",
         "settings_contains_anthropic_key": settings_key_present,
+        "settings_contains_anthropic_auth_token": settings_auth_token_present,
+        "settings_env_keys": settings_env_keys,
         "host_auth_files_detected": host_auth_files,
         "runtime_auth_files_detected": runtime_auth_files,
         "container_workers": worker_states,

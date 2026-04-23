@@ -1,6 +1,6 @@
 # optloop-marketplace
 
-Current plugin version: `0.1.28`
+Current plugin version: `0.1.30`
 
 This repository contains the OptLoop marketplace plugin. The current implementation is an outer supervisor that runs in the host project and orchestrates Docker runtime containers plus in-container Claude workers.
 
