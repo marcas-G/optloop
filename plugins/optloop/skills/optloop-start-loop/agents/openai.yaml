@@ -1,4 +1,4 @@
 interface:
-  display_name: "OptLoop Start"
-  short_description: "Open OptLoop in the runtime container."
-  default_prompt: "Open OptLoop for this repository in the foreground runtime container."
+  display_name: "OptLoop Start Loop"
+  short_description: "Start the OptLoop background runner."
+  default_prompt: "Start the OptLoop background runner for this repository."

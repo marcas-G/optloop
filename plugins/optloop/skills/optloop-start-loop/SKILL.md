@@ -1,9 +1,9 @@
 ---
 name: optloop-start-loop
-description: Start OptLoop for the current repository by opening Claude Code in the runtime container as a foreground interactive process. Use when the user asks to start OptLoop, launch the optimization work, open the runtime window, or run the former /optloop:start-loop command.
+description: Start the OptLoop background runner for the current repository. Use when the user asks to start OptLoop, launch the optimization work, start the background runner, or run the former /optloop:start-loop command.
 ---
 
-# OptLoop Start
+# OptLoop Start Loop
 
 ## Action
 
@@ -22,4 +22,4 @@ variable references.
 
 - Do not inspect repository files before launching.
 - Do not diagnose benchmark readiness before launching.
-- Keep the launched container session in the foreground.
+- Report only whether the background launch succeeded.
