@@ -223,11 +223,10 @@ def sync_tree_overlay(src: Path, dst: Path) -> None:
 def copy_user_settings_into_runtime(repo: Path, overwrite: bool = False) -> None:
     paths = state_paths(repo)
 
-    user_settings = Path.home() / ".claude" / "settings.json"
-    runtime_settings = paths["runtime_claude_dir"] / "settings.json"
-
-    if not user_settings.exists():
+    user_settings = detect_host_claude_settings_path()
+    if user_settings is None:
         return
+    runtime_settings = paths["runtime_claude_dir"] / "settings.json"
 
     runtime_settings.parent.mkdir(parents=True, exist_ok=True)
 
@@ -235,6 +234,24 @@ def copy_user_settings_into_runtime(repo: Path, overwrite: bool = False) -> None
         return
 
     shutil.copy2(user_settings, runtime_settings)
+
+
+def detect_host_claude_settings_path() -> Optional[Path]:
+    env_path = os.environ.get("CLAUDE_SETTINGS_PATH", "").strip()
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+
+    home = Path.home()
+    candidates = [
+        home / ".claude" / "settings.json",
+        home / ".claude" / "setting.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+    return None
 
 
 def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> None:
@@ -269,6 +286,10 @@ def init_repo(repo: Path) -> None:
     execution_cfg = cfg.setdefault("execution", {})
     if execution_cfg.get("image") in {None, "", "optloop-worker:latest"}:
         execution_cfg["image"] = default_project_image(repo)
+    if not str(execution_cfg.get("settings_host_path", "")).strip():
+        host_settings = detect_host_claude_settings_path()
+        if host_settings is not None:
+            execution_cfg["settings_host_path"] = str(host_settings)
     ensure_runtime_pack(repo, cfg)
     save_config(repo, cfg)
 
@@ -353,6 +374,35 @@ def console_safe_text(text: str) -> str:
         return text.encode(enc, errors="replace").decode(enc, errors="replace")
 
 
+def redact_env_assignment(value: str) -> str:
+    if "=" not in value:
+        return value
+    key, _ = value.split("=", 1)
+    return f"{key}=***"
+
+
+def format_command_for_log(cmd: list[str]) -> str:
+    rendered: list[str] = []
+    idx = 0
+    while idx < len(cmd):
+        part = str(cmd[idx])
+        if part in {"-e", "--env"}:
+            rendered.append(part)
+            idx += 1
+            if idx < len(cmd):
+                rendered.append(redact_env_assignment(str(cmd[idx])))
+            idx += 1
+            continue
+        if part.startswith("--env="):
+            _, rhs = part.split("--env=", 1)
+            rendered.append(f"--env={redact_env_assignment(rhs)}")
+            idx += 1
+            continue
+        rendered.append(part)
+        idx += 1
+    return " ".join(rendered)
+
+
 def repo_key(repo: Path) -> str:
     return hashlib.sha1(str(repo.resolve()).encode("utf-8")).hexdigest()[:12]
 
@@ -434,6 +484,18 @@ def runtime_container_names(repo: Path, cfg: Dict[str, Any]) -> list[str]:
     return names
 
 
+def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    for key in cfg.get("execution", {}).get("passthrough_env", []):
+        name = str(key).strip()
+        if not name:
+            continue
+        value = os.environ.get(name)
+        if value:
+            values[name] = value
+    return values
+
+
 def run(
     cmd: list[str],
     cwd: Optional[Path] = None,
@@ -441,6 +503,7 @@ def run(
     capture: bool = True,
     timeout_sec: Optional[int] = 120,
 ) -> subprocess.CompletedProcess[str]:
+    command_for_log = format_command_for_log(cmd)
     try:
         proc = subprocess.run(
             cmd,
@@ -450,10 +513,10 @@ def run(
             timeout=timeout_sec,
         )
     except subprocess.TimeoutExpired as exc:
-        raise OptLoopError(f"Command timed out after {timeout_sec}s: {' '.join(cmd)}") from exc
+        raise OptLoopError(f"Command timed out after {timeout_sec}s: {command_for_log}") from exc
     if check and proc.returncode != 0:
         raise OptLoopError(
-            f"Command failed ({proc.returncode}): {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+            f"Command failed ({proc.returncode}): {command_for_log}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
     return proc
 
@@ -647,11 +710,17 @@ def probe_claude_worker(repo: Path, container_name: str) -> Dict[str, Any]:
         state = line
 
     last_line = ""
+    recent_lines: list[str] = []
     log_host = worker_log_host_path(repo, container_name)
     if log_host.exists():
         lines = log_host.read_text(encoding="utf-8", errors="replace").splitlines()
         if lines:
             last_line = trim_text(lines[-1], 140)
+            recent_lines = lines[-80:]
+
+    auth_markers = ("auth_missing", "auth_required", "not logged in", "please run /login")
+    if any(any(marker in line.lower() for marker in auth_markers) for line in recent_lines):
+        state = "auth_missing"
 
     return {
         "container": container_name,
@@ -694,6 +763,14 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "  fi\n"
         "  while true; do\n"
         "    TS=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
+        "    AUTH_READY=0\n"
+        "    if [ -n \"${ANTHROPIC_API_KEY:-}\" ]; then AUTH_READY=1; fi\n"
+        "    if [ -f \"$HOME/.claude/.credentials.json\" ] || [ -f \"$HOME/.claude/credentials.json\" ] || [ -f \"$HOME/.claude/auth.json\" ]; then AUTH_READY=1; fi\n"
+        "    if [ \"$AUTH_READY\" -ne 1 ]; then\n"
+        "      echo \"[$TS] auth_missing container=$OPTLOOP_WORKER_CONTAINER hint='set ANTHROPIC_API_KEY or run /login in this runtime home'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      sleep 60\n"
+        "      continue\n"
+        "    fi\n"
         "    if ! command -v \"$OPTLOOP_CLAUDE_COMMAND\" >/dev/null 2>&1; then\n"
         "      echo \"[$TS] missing_claude_command container=$OPTLOOP_WORKER_CONTAINER cmd=$OPTLOOP_CLAUDE_COMMAND\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
         "      sleep 30\n"
@@ -716,6 +793,11 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "    fi\n"
         "    TS_END=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
         "    echo \"[$TS_END] cycle_end container=$OPTLOOP_WORKER_CONTAINER exit_code=$RC\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "    if [ \"$RC\" -ne 0 ] && tail -n 80 \"$OPTLOOP_WORKER_LOGFILE\" | grep -qi 'not logged in'; then\n"
+        "      echo \"[$TS_END] auth_required container=$OPTLOOP_WORKER_CONTAINER hint='run /login or set ANTHROPIC_API_KEY'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      sleep 60\n"
+        "      continue\n"
+        "    fi\n"
         "    sleep \"$OPTLOOP_CLAUDE_RESTART_DELAY_SEC\"\n"
         "  done\n"
         ") >/dev/null 2>&1 &\n"
@@ -724,35 +806,33 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "echo \"started:$NEW_PID\"\n"
     )
 
-    run(
-        [
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "-e",
-            f"OPTLOOP_WORKER_CONTAINER={container_name}",
-            "-e",
-            f"OPTLOOP_WORKER_PIDFILE={worker_pid_container_path(container_name)}",
-            "-e",
-            f"OPTLOOP_WORKER_LOGFILE={worker_log_container_path(container_name)}",
-            "-e",
-            f"OPTLOOP_PROMPT_FILE={worker_prompt_container_path()}",
-            "-e",
-            f"OPTLOOP_CLAUDE_COMMAND={command}",
-            "-e",
-            f"OPTLOOP_CLAUDE_RESTART_DELAY_SEC={restart_delay}",
-            "-e",
-            f"OPTLOOP_CLAUDE_SKIP_PERMISSIONS={skip_permissions}",
-            "-e",
-            "CLAUDE_PROJECT_DIR=/workspace",
-            container_name,
-            "sh",
-            "-lc",
-            start_script,
-        ],
-        check=False,
-    )
+    exec_cmd = [
+        "docker",
+        "exec",
+        "-w",
+        "/workspace",
+        "-e",
+        f"OPTLOOP_WORKER_CONTAINER={container_name}",
+        "-e",
+        f"OPTLOOP_WORKER_PIDFILE={worker_pid_container_path(container_name)}",
+        "-e",
+        f"OPTLOOP_WORKER_LOGFILE={worker_log_container_path(container_name)}",
+        "-e",
+        f"OPTLOOP_PROMPT_FILE={worker_prompt_container_path()}",
+        "-e",
+        f"OPTLOOP_CLAUDE_COMMAND={command}",
+        "-e",
+        f"OPTLOOP_CLAUDE_RESTART_DELAY_SEC={restart_delay}",
+        "-e",
+        f"OPTLOOP_CLAUDE_SKIP_PERMISSIONS={skip_permissions}",
+        "-e",
+        "CLAUDE_PROJECT_DIR=/workspace",
+    ]
+    for key, val in passthrough_env_values(cfg).items():
+        exec_cmd += ["-e", f"{key}={val}"]
+    exec_cmd += [container_name, "sh", "-lc", start_script]
+
+    run(exec_cmd, check=False)
     return probe_claude_worker(repo, container_name)
 
 
@@ -835,10 +915,8 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
     if user_value:
         cmd += ["--user", user_value]
 
-    for key in cfg["execution"].get("passthrough_env", []):
-        val = os.environ.get(key)
-        if val:
-            cmd += ["-e", f"{key}={val}"]
+    for key, val in passthrough_env_values(cfg).items():
+        cmd += ["-e", f"{key}={val}"]
 
     if settings_host:
         shp = Path(settings_host).expanduser()
