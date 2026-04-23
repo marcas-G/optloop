@@ -1,33 +1,63 @@
 ---
 name: benchmark-construction
-description: Build or repair benchmark coverage that reflects real repository usage, produces repeated measurements, and includes a correctness gate for the same code path.
-user-invocable: false
+description: Design, repair, and document repository-specific benchmarks, metrics, workloads, correctness checks, and review policy as project decisions made from repository evidence.
 ---
 
-## Bundled support files
+## Principle
 
-- `templates/benchmark-manifest.template.json` — starting structure for `.optloop-runtime/benchmark-manifest.json`
-- `examples/python-cli-benchmark.md` — benchmark pattern for command-line Python repositories
-- `examples/http-service-benchmark.md` — benchmark pattern for service-style repositories
+The benchmark is a project design decision made from repository evidence.
+Choose the scenario, metric, workload, correctness checks, and review policy
+from the repository itself.
 
-## Benchmark selection order
+## Durable Outputs
 
-Prefer in this order:
-1. existing project benchmark targets,
-2. existing performance tests in CI,
-3. repository-native test or benchmark frameworks,
-4. light custom harness under `.optloop-runtime/benchmarks/`.
+Write or update:
 
-A benchmark is acceptable only if:
-- it exercises the code path that a user or upstream caller actually cares about,
-- it can be run repeatedly,
-- it produces a primary metric with a clear direction,
-- it has a paired correctness gate,
-- it is documented in `.optloop-runtime/benchmark-manifest.json`.
+- `.optloop-runtime/benchmark-manifest.json`
+- `.optloop-runtime/review-policy.json`
+- benchmark support files when needed
+- event records explaining what changed and why
 
-## Import path discipline
+Useful bundled examples:
 
-Generated Python benchmark scripts must be runnable from the repository root without requiring package installation. Add a small path bootstrap near the top before project imports:
+- `templates/benchmark-manifest.template.json`
+- `examples/review-policy.example.json`
+- `examples/python-backtest-manifest.example.json`
+
+## Benchmark Selection
+
+Prefer, in order:
+
+1. Existing project benchmark targets.
+2. Existing performance tests or CI performance jobs.
+3. Repository-native benchmark tools.
+4. A light custom harness that exercises a realistic user path.
+5. A provisional benchmark when no better option is visible.
+
+If the benchmark is provisional, say so in the manifest and keep improving it
+across future work sessions.
+
+## Manifest Guidance
+
+The manifest should capture your reasoning:
+
+- measured user scenario,
+- primary metric and direction,
+- why that metric matters,
+- commands to run,
+- sample strategy,
+- correctness or equivalence checks,
+- artifact paths,
+- known weaknesses or next improvements.
+
+The schema is intentionally permissive. Prefer useful durable memory over
+fitting a rigid shape.
+
+## Import Path Discipline
+
+Generated Python benchmark scripts must be runnable from the repository root
+without requiring package installation. Add a small path bootstrap near the top
+before project imports:
 
 ```python
 import sys
@@ -40,4 +70,4 @@ for candidate in (ROOT, ROOT / "src"):
         sys.path.insert(0, value)
 ```
 
-Prefer this bootstrap for generated benchmark files under `benchmarks/` or `.optloop-runtime/benchmarks/` so `python benchmarks/name.py` works for both flat and `src/` Python layouts.
+Use the equivalent local bootstrap for other ecosystems when needed.

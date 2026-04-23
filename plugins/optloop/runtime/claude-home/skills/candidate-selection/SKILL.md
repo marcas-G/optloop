@@ -1,20 +1,32 @@
 ---
 name: candidate-selection
-description: Select and scope one optimization hypothesis at a time, preferring reversible changes tied to measured or obvious cost centers.
-user-invocable: false
+description: Help choose and scope repository optimization attempts from project evidence, while keeping benchmark design, review method, and accept/reject decisions inside the current work.
 ---
 
-## Candidate sources
+## Candidate Sources
 
-Use these sources, in order of confidence:
-1. profile or benchmark output identifying a hot path,
-2. repeated allocations or serialization overhead,
-3. redundant work in loops,
-4. unnecessary copying or conversions,
-5. avoidable blocking I/O on the measured path,
-6. obvious algorithmic waste,
-7. configuration-level runtime improvements.
+Use any project-specific evidence you judge relevant. Useful sources include:
 
-## One-hypothesis rule
+1. Benchmark or profile output.
+2. Real user path inspection.
+3. Repeated allocations, parsing, serialization, or conversions.
+4. Repeated work on measured hot paths.
+5. Avoidable copying or data structure churn.
+6. Avoidable blocking I/O.
+7. Algorithmic waste.
+8. Configuration or runtime setup that clearly affects the measured path.
 
-Each attempt should have one primary hypothesis. If a candidate idea unfolds into multiple changes, split them into separate attempts whenever possible.
+## Attempt Scope
+
+Prefer one primary hypothesis per attempt when practical. If a candidate becomes
+several unrelated changes, split or reject it. If the project demands a broader
+change, record why in attempt evidence.
+
+## No Human Wait
+
+When no strong candidate is obvious, record a failed search attempt or blocker
+and choose the next exploration direction for the handoff.
+
+## Bundled Example
+
+- `examples/candidate-search-record.md`

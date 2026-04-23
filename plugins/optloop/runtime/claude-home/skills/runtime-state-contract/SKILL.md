@@ -1,32 +1,57 @@
 ---
 name: runtime-state-contract
-description: File and schema contract for `.optloop-runtime/`, including state, attempts, baseline evidence, acceptance records, lockfiles, and event logs.
-user-invocable: false
+description: Durable file contract for repository optimization work, including work-session state, benchmark and review manifests, attempts, evidence, commits, rollbacks, blockers, and event logs under `.optloop-runtime/`.
 ---
 
-## Runtime directory contract
+## State Directory Contract
 
-The durable state for the optimization loop lives under `.optloop-runtime/`.
+The task source of truth lives under `.optloop-runtime/`. Do not rely on
+chat-only state for optimization quality, benchmark choices, review decisions,
+commits, or rollbacks.
 
 Required directories:
+
 - `attempts/`
 - `accepted/`
+- `rejected/`
 - `baseline/`
 - `locks/`
 - `worktrees/`
 - `benchmarks/`
+- `results/`
+- `blockers/`
 
 Required files:
+
 - `state.json`
 - `events.jsonl`
 
-Optional files:
-- `benchmark-manifest.json`
-- attempt-local evidence files
+Repository-specific design files:
 
-## Bundled schemas and examples
+- `benchmark-manifest.json`
+- `review-policy.json`
+
+Attempt directories should contain durable evidence such as:
+
+- `summary.json`
+- `decision.json`
+- `commands.txt`
+- `review-evidence.*`
+- `benchmark-evidence.*`
+- `diff.patch`
+- command logs or artifact pointers
+
+## Event Records
+
+Append newline-delimited JSON to `events.jsonl`. Include at least timestamp,
+phase, event name, attempt id when relevant, and a concise message.
+
+## Schemas And Examples
 
 - `schemas/runtime-state.schema.json`
 - `schemas/benchmark-manifest.schema.json`
 - `examples/state.example.json`
 - `examples/attempt.example.json`
+- `examples/decision.accept.example.json`
+- `examples/decision.reject.example.json`
+- `examples/blocker.example.json`

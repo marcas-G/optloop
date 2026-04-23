@@ -25,7 +25,7 @@ def main() -> int:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "state_path": str(state_path.relative_to(root))
     }
-    (runtime / "last-session-stop.json").write_text(json.dumps(stop_record, indent=2) + "\n", encoding="utf-8")
+    (runtime / "last-work-stop.json").write_text(json.dumps(stop_record, indent=2) + "\n", encoding="utf-8")
     return 0
 
 

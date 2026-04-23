@@ -32,17 +32,21 @@ def main() -> int:
     except Exception:
         return 0
 
-    print("## OptLoop continuity context")
+    print("## Durable repository optimization context")
     print(f"- phase: {state.get('phase')}")
     print(f"- status: {state.get('status')}")
     print(f"- current_attempt: {state.get('current_attempt')}")
     print(f"- accepted_count: {state.get('accepted_count')}")
     print(f"- rejected_count: {state.get('rejected_count')}")
     print(f"- stop_requested: {state.get('stop_requested')}")
+    print(f"- next_action: {state.get('next_action')}")
+    if state.get("last_blocker"):
+        print(f"- last_blocker: {state.get('last_blocker')}")
     if state.get("primary_metric"):
         print(f"- primary_metric: {state.get('primary_metric')} ({state.get('metric_direction')})")
     if state.get("baseline_summary"):
         print(f"- baseline_summary: {state.get('baseline_summary')}")
+    print("- persist progress before stopping.")
     print("- durable state is stored under `.optloop-runtime/`; prefer those files over transcript memory.")
     return 0
 

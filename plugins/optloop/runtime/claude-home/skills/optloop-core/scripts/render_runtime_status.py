@@ -36,7 +36,7 @@ def main() -> int:
     runtime = root / ".optloop-runtime"
     state_path = runtime / "state.json"
     if not state_path.exists():
-        print("OptLoop runtime is not initialized in this repository.")
+        print("Optimization state is not initialized in this repository.")
         return 0
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -44,7 +44,7 @@ def main() -> int:
     latest_attempt_path, latest_attempt = newest_json(runtime / "attempts")
     event_tail = tail_lines(runtime / "events.jsonl", 5)
 
-    print("## OptLoop Runtime Status")
+    print("## Repository Optimization Status")
     print(f"- repo: {root}")
     print(f"- phase: {state.get('phase')}")
     print(f"- status: {state.get('status')}")
@@ -53,9 +53,12 @@ def main() -> int:
     print(f"- rejected_count: {state.get('rejected_count')}")
     print(f"- aborted_count: {state.get('aborted_count')}")
     print(f"- stop_requested: {state.get('stop_requested')}")
+    print(f"- next_action: {state.get('next_action')}")
+    print(f"- last_blocker: {state.get('last_blocker')}")
     print(f"- primary_metric: {state.get('primary_metric')}")
     print(f"- metric_direction: {state.get('metric_direction')}")
     print(f"- benchmark_manifest: {state.get('benchmark_manifest')}")
+    print(f"- review_policy: {state.get('review_policy')}")
 
     if latest_accept_path and latest_accept:
         print("\n## Latest accepted attempt")

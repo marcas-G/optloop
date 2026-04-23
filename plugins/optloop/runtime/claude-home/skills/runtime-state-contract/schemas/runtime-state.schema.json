@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "OptLoopRuntimeState",
+  "title": "RepositoryOptimizationState",
   "type": "object",
   "required": [
     "version",
@@ -13,11 +13,11 @@
     "aborted_count",
     "stop_requested",
     "benchmark_manifest",
-    "primary_metric",
-    "metric_direction",
-    "baseline_summary",
+    "review_policy",
+    "next_action",
     "notes"
   ],
+  "additionalProperties": true,
   "properties": {
     "version": {
       "type": "integer",
@@ -28,6 +28,18 @@
     },
     "phase": {
       "type": "string"
+    },
+    "last_work_started_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_work_finished_at": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "current_attempt": {
       "type": [
@@ -63,10 +75,23 @@
         "null"
       ]
     },
+    "last_blocker": {
+      "type": [
+        "object",
+        "string",
+        "null"
+      ]
+    },
+    "next_action": {
+      "type": "string"
+    },
     "stop_requested": {
       "type": "boolean"
     },
     "benchmark_manifest": {
+      "type": "string"
+    },
+    "review_policy": {
       "type": "string"
     },
     "primary_metric": {

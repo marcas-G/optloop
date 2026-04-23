@@ -1,20 +1,23 @@
 ---
 name: parallel-experimentation
-description: Run several independent optimization candidates in isolated git worktrees while keeping acceptance serialized and state updates durable.
-user-invocable: false
+description: Run independent optimization attempts in isolated git worktrees or equivalent directories while keeping commits and rollback state durable.
 ---
 
 ## Purpose
 
-Increase throughput without corrupting the accepted code state.
+Parallel work may improve throughput, but isolation and commit discipline must
+be explicit. Do not defer candidate judgment or merge discipline.
 
 ## Rules
 
-- The accepted code path is the only place where accepted changes may land.
-- Each candidate should run in its own git worktree when the repo structure allows it.
-- Acceptance is serialized through `.optloop-runtime/locks/accept.lock`.
-- Search and implementation can be parallel; merging cannot.
+- Prefer one isolated worktree or equivalent workspace per attempt.
+- Do not let two candidates edit the same accepted checkout at the same time.
+- Serialize commits through `.optloop-runtime/locks/accept.lock` or an
+  equivalent recorded lock.
+- If parallel attempts are based on an old accepted revision, either revalidate
+  them before commit or reject/requeue them.
+- Record workspace paths in the attempt directory.
 
-## Bundled reference
+## Bundled Reference
 
 - `examples/worktree-layout.md`

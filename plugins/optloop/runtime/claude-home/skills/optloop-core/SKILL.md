@@ -1,53 +1,72 @@
 ---
 name: optloop-core
-description: Operating model for an autonomous optimization runtime that repeatedly generates candidates, benchmarks them, accepts only statistically supported improvements, and keeps trying after rejected attempts.
-user-invocable: false
+description: Operating model for one bounded repository optimization work session where Claude reconstructs context from `.optloop-runtime/`, makes one coherent optimization step, and persists a handoff for future work.
 ---
 
 ## Objective
 
-Run a persistent performance-optimization loop that is conservative about acceptance and aggressive about cleanup and retry.
+Complete one useful work session for unattended repository optimization. Do not
+assume hidden memory or outside coordination. Use `.optloop-runtime/` as the
+handoff medium.
 
-The system is successful when it does the following reliably:
-- produces valid benchmark evidence,
-- rejects noisy or behavior-changing candidates,
-- keeps searching after failures,
-- persists durable state outside the chat transcript.
+The session is successful when it:
 
-## Required bundled tools
+- reconstructs state from disk,
+- decides the next useful action,
+- performs one coherent unit of work,
+- persists evidence and state,
+- records a clear `next_action`.
+
+## Required Bundled Tools
 
 Use these support files from this skill directory:
-- `scripts/ensure_runtime_layout.py` — create `.optloop-runtime/` when missing
-- `scripts/render_runtime_status.py` — summarize the current runtime state
-- `scripts/session_start.py` — continuity summary for hooks
-- `scripts/session_stop.py` — durable stop marker for hooks
-- `templates/default_state.json` — canonical initial state structure
-- `examples/state-transitions.md` — phase usage reference
 
-## State machine
+- `scripts/ensure_runtime_layout.py` to create `.optloop-runtime/` when missing.
+- `scripts/render_runtime_status.py` to summarize durable state.
+- `scripts/session_start.py` for continuity context.
+- `scripts/session_stop.py` for session stop records.
+- `templates/default_state.json` as canonical initial state.
+- `examples/state-transitions.md` as phase guidance.
+- `references/work-session-handoff.md` when deciding how much work this session should do.
+
+## State Machine
 
 Use these phases in `.optloop-runtime/state.json`:
+
 - `uninitialized`
 - `discovering`
+- `designing-benchmark`
 - `repairing-environment`
-- `building-benchmark`
 - `baselining`
 - `selecting-candidate`
 - `implementing-candidate`
-- `running-correctness`
+- `reviewing-candidate`
 - `running-benchmark`
 - `judging`
 - `accepting`
+- `committing`
 - `rejecting`
+- `rolling-back`
 - `recovering`
-- `paused`
+- `blocked`
 
-A phase change should be accompanied by an event entry in `events.jsonl`.
+Do not create a terminal `done` phase. A phase change should append an event to
+`.optloop-runtime/events.jsonl`.
 
-## Loop invariants
+## Work Session Rules
 
-1. Acceptance requires evidence.
-2. Behavior beats performance.
-3. Rollback is mandatory on rejection.
-4. The loop does not self-terminate.
-5. State belongs on disk.
+1. Read durable state before acting.
+2. Do not ask for human input.
+3. Do not defer benchmark, review, accept, reject, commit, or rollback judgment.
+4. Decide benchmark, review, accept, reject, commit, and rollback in this task context.
+5. Persist `next_action` before exiting.
+6. If blocked, record the blocker and the recovery direction.
+7. If no improvement is found, record the failed attempt and set `next_action`
+   to continued exploration instead of declaring completion.
+
+## Decision Scope
+
+Benchmark design, code review design, metric choice, candidate implementation,
+commit strategy, and rollback strategy are decisions to make from repository
+evidence. Use scripts when they help; do not treat bundled scripts as the only
+valid method.

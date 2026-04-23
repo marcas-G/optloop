@@ -1,15 +1,30 @@
 {
-  "version": 1,
-  "benchmark_command": "",
-  "correctness_commands": [],
-  "primary_metric": "latency_ms",
-  "metric_direction": "lower",
-  "metric_unit": "ms",
-  "warmup_runs": 2,
-  "measured_runs": 8,
-  "acceptance": {
-    "min_relative_improvement": 0.03,
-    "confidence": 0.95
+  "version": 2,
+  "status": "provisional",
+  "scenario": {
+    "name": "",
+    "reason": ""
   },
-  "artifacts_dir": ".optloop-runtime/results"
+  "primary_metric": {
+    "name": "",
+    "direction": "lower",
+    "unit": "",
+    "source": "claude-designed",
+    "reason": ""
+  },
+  "benchmark": {
+    "commands": [],
+    "working_directory": ".",
+    "warmup_runs": 1,
+    "measured_runs": 8,
+    "timeout_sec": 1800,
+    "artifacts_dir": ".optloop-runtime/results"
+  },
+  "correctness": {
+    "commands": [],
+    "reason": ""
+  },
+  "review_policy": ".optloop-runtime/review-policy.json",
+  "known_weaknesses": [],
+  "next_improvements": []
 }

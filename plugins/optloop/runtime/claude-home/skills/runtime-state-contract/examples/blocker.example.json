@@ -1,0 +1,13 @@
+{
+  "blocker_id": "blocker-0004",
+  "recorded_at": "2026-04-23T09:30:00Z",
+  "phase": "repairing-environment",
+  "summary": "Benchmark command cannot import the project package in the current execution environment.",
+  "failing_command": "python .optloop-runtime/benchmarks/benchmark_backtest.py",
+  "stderr_tail": "ModuleNotFoundError: No module named 'example_pkg'",
+  "attempted_repairs": [
+    "checked working directory",
+    "checked PYTHONPATH"
+  ],
+  "next_action": "repair benchmark import path or project installation setup"
+}

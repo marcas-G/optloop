@@ -6,7 +6,17 @@ import json
 import os
 from pathlib import Path
 
-REQUIRED_DIRS = ["attempts", "accepted", "baseline", "locks", "worktrees", "benchmarks"]
+REQUIRED_DIRS = [
+    "attempts",
+    "accepted",
+    "rejected",
+    "baseline",
+    "locks",
+    "worktrees",
+    "benchmarks",
+    "results",
+    "blockers",
+]
 
 
 def detect_repo_root() -> Path:

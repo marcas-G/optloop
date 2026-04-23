@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "status": "provisional",
+  "scope": "project-specific behavior review designed by Claude",
+  "behavior_invariants": [
+    {
+      "name": "public_behavior",
+      "description": "Public commands and APIs should preserve observable behavior for representative inputs."
+    },
+    {
+      "name": "input_domain",
+      "description": "Supported input shapes, sizes, missing values, and edge cases should not be narrowed for speed."
+    }
+  ],
+  "forbidden_shortcuts": [
+    "skip validation or error handling",
+    "reduce benchmark input size to improve timing",
+    "hard-code sample data assumptions",
+    "change output ordering, rounding, or precision without recording why",
+    "weaken existing tests or correctness checks"
+  ],
+  "review_commands": [],
+  "candidate_review_questions": [
+    "What behavior could this optimization accidentally change?",
+    "Does the benchmark still measure end-to-end work?",
+    "Did the candidate change tests, fixtures, data, or benchmark difficulty?",
+    "What extra check would catch the most likely regression?"
+  ],
+  "known_gaps": [],
+  "next_improvements": []
+}

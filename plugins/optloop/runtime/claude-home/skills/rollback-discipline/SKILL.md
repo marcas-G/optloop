@@ -1,18 +1,29 @@
 ---
 name: rollback-discipline
-description: Ensure rejected or interrupted optimization attempts are reverted cleanly, with durable evidence preserved and no patch leakage into the accepted code path.
-user-invocable: false
+description: Guide rejection, interruption, or rollback of repository optimization attempts, preserving evidence while preventing rejected changes from leaking into future work.
 ---
 
 ## Principle
 
-Rejection without cleanup is a bug in the runtime.
+Rollback is part of rejection. Rejection without cleanup and evidence is a task
+failure.
 
-## Required actions on rejection
+## Required Actions On Rejection
 
-1. Preserve the evidence directory.
-2. Record the rejection category and short reason.
-3. Hard-reset the attempt worktree or branch to the parent accepted state.
-4. Delete or quarantine the attempt worktree.
-5. Release any attempt-local locks.
-6. Update `.optloop-runtime/state.json` and append an event entry.
+1. Preserve the attempt evidence directory.
+2. Record the decision and reason.
+3. Undo candidate edits by the method appropriate for the repository: git
+   worktree removal, reset, revert, patch reversal, or another recorded method.
+4. Release attempt-local locks.
+5. Update `.optloop-runtime/state.json`.
+6. Append an event entry.
+7. Set `next_action` so future work can continue.
+
+## Interrupted Work
+
+If cleanup cannot be completed in this session, record a blocker under
+`.optloop-runtime/blockers/` and set the next action to recovery.
+
+## Bundled Example
+
+- `examples/reject-and-rollback.md`

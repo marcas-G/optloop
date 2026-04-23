@@ -1,0 +1,22 @@
+{
+  "attempt_id": "attempt-0012",
+  "decision": "accept",
+  "decided_at": "2026-04-23T09:12:00Z",
+  "hypothesis": "Reuse parsed configuration on the measured request path.",
+  "benchmark": {
+    "verdict": "pass",
+    "primary_metric": "latency_ms",
+    "direction": "lower",
+    "summary": "Repeated samples were clearly faster under the project-specific benchmark."
+  },
+  "review": {
+    "verdict": "pass",
+    "summary": "No narrowed input support or benchmark-only shortcut found."
+  },
+  "commit": {
+    "method": "git commit",
+    "revision": "abc1234",
+    "message": "[optimization] accept attempt-0012"
+  },
+  "next_action": "refresh baseline from accepted revision"
+}

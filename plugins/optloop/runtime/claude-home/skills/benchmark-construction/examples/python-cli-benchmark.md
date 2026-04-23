@@ -7,4 +7,4 @@ When a repository exposes a command-line entrypoint, a credible benchmark often 
 - benchmark command:
   - `python -m pytest tests/benchmarks/test_cli_benchmark.py --benchmark-json .optloop-runtime/results/cli.json`
 
-Keep the benchmark focused on a real CLI invocation path. Avoid importing an internal helper directly unless the helper is already the repository's own stable benchmark target.
+Keep the benchmark focused on a real CLI invocation path. Avoid importing an internal helper directly unless the helper is already the repository's stable benchmark target.

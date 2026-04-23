@@ -124,7 +124,7 @@ def decide(baseline: list[float], candidate: list[float], direction: str, min_re
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Bootstrap-based metric acceptance gate for OptLoop.")
+    parser = argparse.ArgumentParser(description="Bootstrap-based metric acceptance gate for repository optimization.")
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--direction", choices=["lower", "higher"], required=True)

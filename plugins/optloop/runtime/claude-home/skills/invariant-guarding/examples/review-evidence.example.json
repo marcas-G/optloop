@@ -1,0 +1,30 @@
+{
+  "attempt_id": "attempt-0012",
+  "reviewed_at": "2026-04-23T10:20:00Z",
+  "verdict": "pass",
+  "policy_source": ".optloop-runtime/review-policy.json",
+  "changed_files": [
+    "service/handler.py"
+  ],
+  "risks_checked": [
+    {
+      "risk": "input domain narrowed",
+      "result": "not found",
+      "evidence": "The change only memoizes configuration parsing and does not alter input validation."
+    },
+    {
+      "risk": "benchmark-only shortcut",
+      "result": "not found",
+      "evidence": "No benchmark fixture paths or sample constants are referenced from production code."
+    },
+    {
+      "risk": "stale cache",
+      "result": "mitigated",
+      "evidence": "Cache key includes the full immutable configuration object."
+    }
+  ],
+  "commands_run": [
+    "pytest tests/test_api_contract.py"
+  ],
+  "recommended_next_action": "run benchmark samples and judge measured evidence"
+}

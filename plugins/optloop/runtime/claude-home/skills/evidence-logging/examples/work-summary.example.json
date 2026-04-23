@@ -1,0 +1,14 @@
+{
+  "started_at": "2026-04-23T10:30:00Z",
+  "finished_at": "2026-04-23T10:33:40Z",
+  "initial_phase": "implementing-candidate",
+  "final_phase": "reviewing-candidate",
+  "work_completed": [
+    "implemented one candidate hypothesis",
+    "saved candidate diff",
+    "ran project unit tests"
+  ],
+  "attempt_id": "attempt-0014",
+  "next_action": "run project-specific review and benchmark for attempt-0014",
+  "blocker": null
+}

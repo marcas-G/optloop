@@ -1,14 +1,14 @@
 ---
 name: environment-repair
-description: Repair command execution problems that block correctness or benchmark runs, with a bias toward minimal, local, reversible fixes.
-user-invocable: false
+description: Repair command execution problems that block repository optimization work from continuing benchmark design, review, candidate evaluation, commit, rollback, or recovery.
 ---
 
 ## Goal
 
-Make the required commands run without broadening scope or hiding breakage.
+Make a future work session able to continue. Repair the smallest credible
+blocker without hiding real project failures.
 
-## Repair order
+## Repair Order
 
 1. Read the failing command and full stderr.
 2. Determine whether the failure is caused by:
@@ -19,10 +19,12 @@ Make the required commands run without broadening scope or hiding breakage.
    - wrong working directory,
    - broken relative imports,
    - stale generated artifacts,
-   - repository script drift.
-3. Prefer the smallest credible fix.
+   - repository script drift,
+   - git/worktree state.
+3. Choose a local repair, record it, and verify it when practical.
+4. If no safe repair is possible, write a blocker and set the next action.
 
-## Bundled examples
+## Bundled Examples
 
 - `examples/python-import-failure.md`
 - `examples/path-resolution-failure.md`

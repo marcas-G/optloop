@@ -1,5 +1,7 @@
 {
   "attempt_id": "attempt-0007",
+  "started_at": "2026-04-23T09:00:00Z",
+  "finished_at": "2026-04-23T09:03:12Z",
   "parent_revision": "main@{accepted-2}",
   "hypothesis": "Avoid repeated JSON decoding on the measured request path.",
   "changed_files": [
@@ -10,10 +12,15 @@
     "pytest tests/test_api_contract.py",
     "pytest tests/benchmarks/test_request_path.py --benchmark-json .optloop-runtime/results/attempt-0007.json"
   ],
-  "result": "rejected",
-  "rejection_category": "no-meaningful-improvement",
-  "primary_metric_summary": {
-    "baseline_mean": 31.4,
-    "candidate_mean": 30.9
-  }
+  "benchmark": {
+    "verdict": "uncertain",
+    "primary_metric": "latency_ms",
+    "direction": "lower"
+  },
+  "review": {
+    "verdict": "pass",
+    "method": "project-specific Claude review"
+  },
+  "decision": "reject",
+  "decision_reason": "benchmark evidence did not clearly support keeping the candidate"
 }

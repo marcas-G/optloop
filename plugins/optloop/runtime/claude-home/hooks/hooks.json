@@ -1,5 +1,5 @@
 {
-  "description": "OptLoop runtime continuity hooks",
+  "description": "Repository optimization continuity hooks",
   "hooks": {
     "SessionStart": [
       {

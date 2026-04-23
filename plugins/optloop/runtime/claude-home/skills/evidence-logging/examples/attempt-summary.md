@@ -1,18 +1,23 @@
 # Attempt summary example
 
-Each attempt directory should contain:
-- `attempt.json`
-- `summary.md`
-- raw benchmark outputs
-- correctness outputs
+Each attempt directory should contain durable evidence for future work:
+
+- `summary.json`
+- `decision.json`
+- `commands.txt`
+- raw benchmark outputs or artifact pointers
+- review outputs
 - optional patch or diff files
 
-`attempt.json` should record:
+`summary.json` should record:
+
 - attempt id
-- parent accepted revision
+- parent revision when known
 - hypothesis
 - changed files
 - commands run
-- result
-- rejection category if any
-- primary metric summary
+- benchmark summary
+- review summary
+- final decision
+- commit id or rollback action if applicable
+- next action

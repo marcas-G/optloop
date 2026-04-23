@@ -1,8 +1,16 @@
 # Worktree layout example
 
-Suggested runtime layout:
+Suggested workspace layout:
+
 - `.optloop-runtime/worktrees/attempt-0001/`
 - `.optloop-runtime/worktrees/attempt-0002/`
 - `.optloop-runtime/worktrees/attempt-0003/`
 
-Each worktree should point to a distinct git worktree path and a distinct attempt directory under `.optloop-runtime/attempts/`.
+Each workspace should map to one attempt directory:
+
+- `.optloop-runtime/attempts/attempt-0001/`
+- `.optloop-runtime/attempts/attempt-0002/`
+- `.optloop-runtime/attempts/attempt-0003/`
+
+Choose whether to use git worktrees, branches, patch files, or another
+reversible method, and record the method and cleanup result.

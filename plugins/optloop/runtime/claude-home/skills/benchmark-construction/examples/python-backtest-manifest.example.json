@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "status": "provisional",
+  "scenario": {
+    "name": "fixed-input backtest",
+    "reason": "The repository appears to expose a user-facing workflow that evaluates a strategy over historical prices."
+  },
+  "primary_metric": {
+    "name": "elapsed_sec",
+    "direction": "lower",
+    "unit": "seconds",
+    "source": "json_stdout",
+    "reason": "Users benefit when the same backtest completes faster for the same input and behavior."
+  },
+  "benchmark": {
+    "commands": [
+      "python .optloop-runtime/benchmarks/benchmark_backtest.py --input data/sample_prices.csv --repeat 10"
+    ],
+    "working_directory": ".",
+    "warmup_runs": 1,
+    "measured_runs": 9,
+    "timeout_sec": 1800,
+    "artifacts_dir": ".optloop-runtime/results"
+  },
+  "correctness": {
+    "commands": [
+      "python .optloop-runtime/benchmarks/check_backtest_equivalence.py --input data/sample_prices.csv"
+    ],
+    "reason": "Optimizations must preserve the resulting trades and portfolio summary for the benchmark input."
+  },
+  "review_policy": ".optloop-runtime/review-policy.json",
+  "known_weaknesses": [
+    "The sample data may not cover all real market regimes."
+  ],
+  "next_improvements": [
+    "Add a second larger input if the repository contains one."
+  ]
+}

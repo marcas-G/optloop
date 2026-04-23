@@ -1,0 +1,19 @@
+{
+  "attempt_id": "attempt-0013",
+  "decision": "reject",
+  "decided_at": "2026-04-23T09:25:00Z",
+  "hypothesis": "Cache transformed rows during import.",
+  "benchmark": {
+    "verdict": "uncertain",
+    "summary": "Candidate samples overlapped baseline enough that the improvement was not clear."
+  },
+  "review": {
+    "verdict": "pass",
+    "summary": "No behavior risk found, but benchmark evidence was weak."
+  },
+  "rollback": {
+    "method": "git reset --hard parent revision in attempt worktree",
+    "status": "completed"
+  },
+  "next_action": "select a different candidate hypothesis"
+}
