@@ -223,6 +223,9 @@ def init_repo(repo: Path) -> None:
     paths["logs"].mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(repo)
+    execution_cfg = cfg.setdefault("execution", {})
+    if execution_cfg.get("image") in {None, "", "optloop-worker:latest"}:
+        execution_cfg["image"] = default_project_image(repo)
     ensure_runtime_pack(repo, cfg)
     save_config(repo, cfg)
 
@@ -275,8 +278,26 @@ def repo_key(repo: Path) -> str:
     return hashlib.sha1(str(repo.resolve()).encode("utf-8")).hexdigest()[:12]
 
 
+def sanitize_name(raw: str) -> str:
+    cleaned = []
+    last_dash = False
+    for ch in raw.lower():
+        if ch.isalnum() or ch in {"_", ".", "-"}:
+            cleaned.append(ch)
+            last_dash = False
+        elif not last_dash:
+            cleaned.append("-")
+            last_dash = True
+    value = "".join(cleaned).strip("-")
+    return value or "optloop"
+
+
+def default_project_image(repo: Path) -> str:
+    return f"optloop-{sanitize_name(repo.name)}:local"
+
+
 def runtime_container_name(repo: Path) -> str:
-    return f"optloop-runtime-{repo_key(repo)}"
+    return f"optloop-{sanitize_name(repo.name)}"
 
 
 def run(cmd: list[str], cwd: Optional[Path] = None, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess[str]:

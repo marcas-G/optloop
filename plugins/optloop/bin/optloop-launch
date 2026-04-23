@@ -4,12 +4,23 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPTLOOP_BIN="$SELF_DIR/optloop"
+OPTLOOP_INIT="$SELF_DIR/optloop-init"
 
 cd "$REPO_ROOT"
 mkdir -p .optloop/logs
 
 if [ ! -x "$OPTLOOP_BIN" ]; then
   chmod +x "$OPTLOOP_BIN" 2>/dev/null || true
+fi
+if [ -f "$OPTLOOP_INIT" ] && [ ! -x "$OPTLOOP_INIT" ]; then
+  chmod +x "$OPTLOOP_INIT" 2>/dev/null || true
+fi
+
+if [ -f "$OPTLOOP_INIT" ]; then
+  if ! bash "$OPTLOOP_INIT" > .optloop/logs/launcher-init.out 2>&1; then
+    cat .optloop/logs/launcher-init.out >&2
+    exit 1
+  fi
 fi
 
 bash "$OPTLOOP_BIN" init >/dev/null 2>&1 || true

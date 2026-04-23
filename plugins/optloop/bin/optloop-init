@@ -29,12 +29,6 @@ file_fingerprint() {
   fi
 }
 
-container_mount_source() {
-  local container="$1"
-  local destination="$2"
-  docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.Source}}{{end}}{{end}}" "$container" 2>/dev/null || true
-}
-
 pid_is_alive() {
   local pid="$1"
   [ -n "$pid" ] || return 1
@@ -161,7 +155,7 @@ CONTAINER_NAME=$CONTAINER_NAME
 EOF
 
 IMAGE_STATUS="reused"
-CONTAINER_STATUS="reused"
+CONTAINER_STATUS="created"
 
 # 4) build image if missing or stale
 IMAGE_EXISTS="false"
@@ -196,53 +190,36 @@ elif [ "${OPTLOOP_REBUILD_IMAGE:-0}" = "1" ] || [ "$IMAGE_DOCKERFILE_SHA" != "$D
 else
   info "image already exists: $IMAGE_TAG"
 fi
-TARGET_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG")"
 
-# 5) create container if missing or incompatible
+# 5) always create a fresh container for the current plugin/project state
 if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-  ACTUAL_PROJECT_MOUNT="$(container_mount_source "$CONTAINER_NAME" "/workspace")"
-  ACTUAL_PLUGIN_DATA_MOUNT="$(container_mount_source "$CONTAINER_NAME" "/opt/optloop-data")"
-  ACTUAL_IMAGE_ID="$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-  if [ "$ACTUAL_PROJECT_MOUNT" != "$PROJECT_DIR" ] || \
-     [ "$ACTUAL_PLUGIN_DATA_MOUNT" != "$PLUGIN_DATA" ] || \
-     [ "$ACTUAL_IMAGE_ID" != "$TARGET_IMAGE_ID" ]; then
-    info "recreating container $CONTAINER_NAME because image or mounts changed"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-    CONTAINER_STATUS="recreated"
-  fi
+  info "removing existing container: $CONTAINER_NAME"
+  docker rm -f "$CONTAINER_NAME" >/dev/null
+  CONTAINER_STATUS="recreated"
 fi
 
-if ! docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-  info "creating container $CONTAINER_NAME"
-  docker create \
-    --name "$CONTAINER_NAME" \
-    -w /workspace \
-    --label "optloop.project_dir=$PROJECT_DIR" \
-    --label "optloop.plugin_root=$PLUGIN_ROOT" \
-    --label "optloop.plugin_data=$PLUGIN_DATA" \
-    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
-    -v "$PROJECT_DIR:/workspace" \
-    -v "$PLUGIN_DATA:/opt/optloop-data" \
-    -e OPTLOOP_PROJECT_DIR=/workspace \
-    -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
-    -e PYTHONPATH=/workspace:/workspace/src \
-    "$IMAGE_TAG" \
-    tail -f /dev/null >/dev/null
-  if [ "$CONTAINER_STATUS" = "recreated" ]; then
-    CONTAINER_STATUS="recreated"
-  else
-    CONTAINER_STATUS="created"
-  fi
-fi
+info "creating container $CONTAINER_NAME"
+docker create \
+  --name "$CONTAINER_NAME" \
+  -w /workspace \
+  --label "optloop.project_dir=$PROJECT_DIR" \
+  --label "optloop.plugin_root=$PLUGIN_ROOT" \
+  --label "optloop.plugin_data=$PLUGIN_DATA" \
+  --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
+  -v "$PROJECT_DIR:/workspace" \
+  -v "$PLUGIN_DATA:/opt/optloop-data" \
+  -e OPTLOOP_PROJECT_DIR=/workspace \
+  -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
+  -e PYTHONPATH=/workspace:/workspace/src \
+  "$IMAGE_TAG" \
+  tail -f /dev/null >/dev/null
 
 # 6) start container if stopped
 RUNNING_STATE="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")"
 if [ "$RUNNING_STATE" != "true" ]; then
   info "starting container $CONTAINER_NAME"
   docker start "$CONTAINER_NAME" >/dev/null
-  if [ "$CONTAINER_STATUS" = "reused" ]; then
-    CONTAINER_STATUS="started"
-  elif [ "$CONTAINER_STATUS" = "created" ]; then
+  if [ "$CONTAINER_STATUS" = "created" ]; then
     CONTAINER_STATUS="created+started"
   elif [ "$CONTAINER_STATUS" = "recreated" ]; then
     CONTAINER_STATUS="recreated+started"
