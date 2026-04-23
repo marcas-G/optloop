@@ -304,6 +304,36 @@ def resolve_settings_host_path(cfg: Optional[Dict[str, Any]] = None) -> Optional
     return detect_host_claude_settings_path()
 
 
+def resolve_host_claude_dir(cfg: Optional[Dict[str, Any]] = None) -> Optional[Path]:
+    candidates: list[Path] = []
+    settings = resolve_settings_host_path(cfg)
+    if settings is not None:
+        candidates.append(settings.parent)
+
+    homes: list[Path] = [Path.home()]
+    env_home = os.environ.get("HOME", "").strip()
+    if env_home:
+        env_home_path = Path(env_home).expanduser()
+        if env_home_path not in homes:
+            homes.append(env_home_path)
+    for home in homes:
+        candidates.append(home / ".claude")
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+    return None
+
+
 def extract_anthropic_api_key_from_settings(settings_path: Optional[Path]) -> Optional[str]:
     if settings_path is None:
         return None
@@ -992,11 +1022,25 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "  fi\n"
         "  while true; do\n"
         "    TS=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
+        "    if [ -d \"$HOME/.claude-host\" ]; then\n"
+        "      mkdir -p \"$HOME/.claude\"\n"
+        "      for SRC in \"$HOME/.claude-host/.credentials.json\" \"$HOME/.claude-host/credentials.json\" \"$HOME/.claude-host/auth.json\" \"$HOME/.claude-host/settings.json\"; do\n"
+        "        if [ -f \"$SRC\" ]; then cp -f \"$SRC\" \"$HOME/.claude/$(basename \"$SRC\")\" 2>/dev/null || true; fi\n"
+        "      done\n"
+        "    fi\n"
         "    AUTH_READY=0\n"
         "    if [ -n \"${ANTHROPIC_API_KEY:-}\" ]; then AUTH_READY=1; fi\n"
-        "    if [ -f \"$HOME/.claude/.credentials.json\" ] || [ -f \"$HOME/.claude/credentials.json\" ] || [ -f \"$HOME/.claude/auth.json\" ]; then AUTH_READY=1; fi\n"
+        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -f \"$HOME/.claude/settings.json\" ] && grep -qiE 'anthropic[_-]*api[_-]*key' \"$HOME/.claude/settings.json\" 2>/dev/null; then AUTH_READY=1; fi\n"
         "    if [ \"$AUTH_READY\" -ne 1 ]; then\n"
-        "      echo \"[$TS] auth_missing container=$OPTLOOP_WORKER_CONTAINER hint='set ANTHROPIC_API_KEY or run /login in this runtime home'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      for AUTH_DIR in \"$HOME/.claude\" \"$HOME/.config/claude\" \"$HOME/.config/claude-code\" \"$HOME/.config/@anthropic-ai/claude-code\"; do\n"
+        "        if [ -d \"$AUTH_DIR\" ] && find \"$AUTH_DIR\" -maxdepth 4 -type f \\( -name '*auth*.json' -o -name '*credential*.json' -o -name '*token*.json' \\) | grep -q .; then\n"
+        "          AUTH_READY=1\n"
+        "          break\n"
+        "        fi\n"
+        "      done\n"
+        "    fi\n"
+        "    if [ \"$AUTH_READY\" -ne 1 ]; then\n"
+        "      echo \"[$TS] auth_missing container=$OPTLOOP_WORKER_CONTAINER hint='set ANTHROPIC_API_KEY, provide settings.json key, or run /login in this runtime home'\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
         "      sleep 60\n"
         "      continue\n"
         "    fi\n"
@@ -1105,6 +1149,8 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
             f"{runtime_container_home}/.claude/settings.json",
         )
     ).strip()
+    host_claude_dir = resolve_host_claude_dir(cfg)
+    host_claude_mount = f"{runtime_container_home}/.claude-host"
 
     if state == "running":
         return name
@@ -1147,6 +1193,8 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
 
     if settings_host is not None:
         cmd += ["-v", f"{settings_host}:{settings_container}:ro"]
+    if host_claude_dir is not None:
+        cmd += ["-v", f"{host_claude_dir}:{host_claude_mount}:ro"]
 
     extra_run_args = cfg["execution"].get("extra_run_args", [])
     if isinstance(extra_run_args, list):
@@ -1577,6 +1625,7 @@ def cmd_doctor(repo: Path) -> None:
     env_presence = passthrough_env_presence(cfg)
     env_sources = passthrough_env_sources(cfg)
     effective_settings = resolve_settings_host_path(cfg)
+    effective_host_claude_dir = resolve_host_claude_dir(cfg)
     settings_key_present = bool(extract_anthropic_api_key_from_settings(effective_settings))
     host_auth_files = sorted(detect_host_claude_auth_files().keys())
     runtime_auth_files = sorted([str(p.relative_to(paths["runtime_home"])) for p in paths["runtime_home"].rglob("*auth*.json")] +
@@ -1616,6 +1665,7 @@ def cmd_doctor(repo: Path) -> None:
         "passthrough_env_present": env_presence,
         "passthrough_env_sources": env_sources,
         "settings_host_path_effective": str(effective_settings) if effective_settings else "",
+        "host_claude_dir_effective": str(effective_host_claude_dir) if effective_host_claude_dir else "",
         "settings_contains_anthropic_key": settings_key_present,
         "host_auth_files_detected": host_auth_files,
         "runtime_auth_files_detected": runtime_auth_files,

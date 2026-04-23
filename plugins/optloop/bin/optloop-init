@@ -136,6 +136,13 @@ elif [ -f "${HOME:-}/.claude/setting.json" ]; then
   SETTINGS_HOST_PATH="${HOME}/.claude/setting.json"
 fi
 
+HOST_CLAUDE_DIR=""
+if [ -n "${SETTINGS_HOST_PATH}" ]; then
+  HOST_CLAUDE_DIR="$(cd "$(dirname "$SETTINGS_HOST_PATH")" && pwd -P)"
+elif [ -d "${HOME:-}/.claude" ]; then
+  HOST_CLAUDE_DIR="$(cd "${HOME}/.claude" && pwd -P)"
+fi
+
 INIT_LOCK="${LOCK_DIR}/init.lock"
 acquire_init_lock "$INIT_LOCK"
 trap 'rm -rf "$INIT_LOCK"' EXIT
@@ -175,6 +182,7 @@ CACHE_DIR=$CACHE_DIR
 RUNTIME_HOME_HOST=$RUNTIME_HOME_HOST
 RUNTIME_HOME_CONTAINER=$RUNTIME_HOME_CONTAINER
 SETTINGS_HOST_PATH=$SETTINGS_HOST_PATH
+HOST_CLAUDE_DIR=$HOST_CLAUDE_DIR
 DOCKERFILE_PATH=$DOCKERFILE_PATH
 DOCKERFILE_SHA=$DOCKERFILE_SHA
 IMAGE_TAG=$IMAGE_TAG
@@ -249,6 +257,9 @@ while [ "$attempt" -le "$max_attempts" ]; do
   )
   if [ -n "$SETTINGS_HOST_PATH" ]; then
     DOCKER_CMD+=(-v "$SETTINGS_HOST_PATH:$RUNTIME_HOME_CONTAINER/.claude/settings.json:ro")
+  fi
+  if [ -n "$HOST_CLAUDE_DIR" ]; then
+    DOCKER_CMD+=(-v "$HOST_CLAUDE_DIR:$RUNTIME_HOME_CONTAINER/.claude-host:ro")
   fi
   DOCKER_CMD+=("$IMAGE_TAG")
   RUN_OUTPUT="$("${DOCKER_CMD[@]}" 2>&1)" && RUN_RC=0 || RUN_RC=$?
