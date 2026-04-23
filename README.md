@@ -1,6 +1,6 @@
 # optloop-marketplace
 
-Current plugin version: `0.1.30`
+Current plugin version: `0.1.33`
 
 This repository contains the OptLoop marketplace plugin. The current implementation is an outer supervisor that runs in the host project and orchestrates Docker runtime containers plus in-container Claude workers.
 
@@ -42,8 +42,8 @@ Container naming:
 
 Worker auth sources:
 
-1. `ANTHROPIC_API_KEY` from host env (via `execution.passthrough_env`).
-2. `ANTHROPIC_API_KEY` found in host settings file (if present) and injected as passthrough env.
+1. `ANTHROPIC_AUTH_TOKEN` from host env (via `execution.passthrough_env`).
+2. `ANTHROPIC_AUTH_TOKEN` and other `env` entries found in host settings file are injected as passthrough env.
 3. Claude login credentials inside container runtime home.
 
 If missing, worker state becomes `auth_missing` and retries slowly instead of tight failing loops.
@@ -96,6 +96,10 @@ optloop reset
 - `.optloop/STOP`
 - `.optloop/logs/controller.out`
 - `.optloop/logs/claude-worker-<container>.log`
+- `.optloop/history/<iteration>/summary.json`
+- `.optloop/history/<iteration>/git.status.txt`
+- `.optloop/history/<iteration>/git.diff.patch`
+- `.optloop/history/<iteration>/git.diff.staged.patch`
 - `.optloop/runtime/home/.claude` (synced runtime template)
 - `.optloop/runtime/workers/*.pid`
 - `.optloop/runtime/claude_prompt.txt`
@@ -120,7 +124,10 @@ optloop reset
     "claude_prompt": "",
     "settings_host_path": "",
     "settings_container_path": "/opt/optloop-home/.claude/settings.json",
-    "passthrough_env": ["ANTHROPIC_API_KEY"]
+    "passthrough_env": [
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL"
+    ]
   }
 }
 ```
@@ -149,4 +156,4 @@ optloop reset
 1. Install/update this plugin in Claude Code.
 2. In your target repository, run `/optloop:start-loop`.
 3. Check `/optloop:status` and `/optloop:logs`.
-4. If worker state is `auth_missing`, provide `ANTHROPIC_API_KEY` or login in runtime context, then restart loop.
+4. If worker state is `auth_missing`, provide `ANTHROPIC_AUTH_TOKEN` (and provider base URL if needed) or login in runtime context, then restart loop.

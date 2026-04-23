@@ -91,7 +91,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "passthrough_env": [
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_API_KEY",
             "API_TIMEOUT_MS",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -420,16 +419,6 @@ def _extract_setting_value_by_keys(
     return None
 
 
-def extract_anthropic_api_key_from_settings(settings_path: Optional[Path]) -> Optional[str]:
-    data = load_settings_json(settings_path)
-    return _extract_setting_value_by_keys(
-        data,
-        env_keys=["ANTHROPIC_API_KEY", "anthropic_api_key"],
-        normalized_keys={"anthropic_api_key", "anthropicapikey", "api_key", "apikey"},
-        exact_upper_keys={"ANTHROPIC_API_KEY"},
-    )
-
-
 def extract_anthropic_auth_token_from_settings(settings_path: Optional[Path]) -> Optional[str]:
     data = load_settings_json(settings_path)
     return _extract_setting_value_by_keys(
@@ -659,6 +648,105 @@ def runtime_log(event: str, **fields: Any) -> None:
         print(f"[optloop] {ts} {event}", flush=True)
 
 
+def write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def tail_file(path: Path, max_lines: int = 400) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        return ""
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return "\n".join(lines) + "\n"
+
+
+def capture_iteration_history(
+    repo: Path,
+    iteration: int,
+    phase: str,
+    reason: str,
+    container_names: list[str],
+    states: Dict[str, str],
+    worker_statuses: Dict[str, Dict[str, Any]],
+) -> None:
+    paths = state_paths(repo)
+    history_dir = paths["history"] / f"{iteration:08d}"
+    try:
+        history_dir.mkdir(parents=True, exist_ok=True)
+
+        worker_states = {
+            name: worker_statuses.get(name, {}).get("supervisor_state", "unknown")
+            for name in container_names
+        }
+        summary = {
+            "iteration": iteration,
+            "captured_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "phase": phase,
+            "reason": reason,
+            "containers": container_names,
+            "states": states,
+            "worker_states": worker_states,
+            "worker_statuses": worker_statuses,
+        }
+        write_json(history_dir / "summary.json", summary)
+        write_json(history_dir / "status.snapshot.json", read_json(paths["status"], {}))
+
+        git_status = run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=repo,
+            check=False,
+            timeout_sec=30,
+        )
+        status_text = (git_status.stdout or "") + (git_status.stderr or "")
+        if not status_text.strip():
+            status_text = "# clean working tree\n"
+        write_text(history_dir / "git.status.txt", status_text)
+
+        git_diff = run(
+            ["git", "diff", "--", ":(exclude).optloop/**"],
+            cwd=repo,
+            check=False,
+            timeout_sec=60,
+        )
+        diff_text = git_diff.stdout or ""
+        if not diff_text.strip():
+            diff_text = "# no unstaged changes\n"
+        write_text(history_dir / "git.diff.patch", diff_text)
+
+        git_diff_staged = run(
+            ["git", "diff", "--cached", "--", ":(exclude).optloop/**"],
+            cwd=repo,
+            check=False,
+            timeout_sec=60,
+        )
+        diff_staged_text = git_diff_staged.stdout or ""
+        if not diff_staged_text.strip():
+            diff_staged_text = "# no staged changes\n"
+        write_text(history_dir / "git.diff.staged.patch", diff_staged_text)
+
+        controller_tail = tail_file(paths["logs"] / "controller.out", max_lines=240)
+        if controller_tail:
+            write_text(history_dir / "controller.tail.log", controller_tail)
+
+        for container_name in container_names:
+            worker_log = worker_log_host_path(repo, container_name)
+            worker_tail = tail_file(worker_log, max_lines=400)
+            if worker_tail:
+                write_text(history_dir / f"worker-{container_name}.tail.log", worker_tail)
+
+    except Exception as exc:
+        err = str(exc).strip() or exc.__class__.__name__
+        runtime_log("history_capture_error", iteration=iteration, error=err)
+        try:
+            append_live(repo, {"event": "history_capture_error", "iteration": iteration, "error": err})
+        except Exception:
+            pass
+
+
 def console_safe_text(text: str) -> str:
     enc = sys.stdout.encoding or "utf-8"
     try:
@@ -788,7 +876,6 @@ def runtime_container_names(repo: Path, cfg: Dict[str, Any]) -> list[str]:
 
 def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
     settings_path = resolve_settings_host_path(cfg)
-    settings_api_key = extract_anthropic_api_key_from_settings(settings_path)
     settings_auth_token = extract_anthropic_auth_token_from_settings(settings_path)
     settings_env_values = extract_settings_env_values(settings_path)
     values: Dict[str, str] = {}
@@ -802,9 +889,6 @@ def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
             continue
         if name in settings_env_values and settings_env_values[name]:
             values[name] = settings_env_values[name]
-            continue
-        if name == "ANTHROPIC_API_KEY" and settings_api_key:
-            values[name] = settings_api_key
             continue
         if name == "ANTHROPIC_AUTH_TOKEN" and settings_auth_token:
             values[name] = settings_auth_token
@@ -824,7 +908,6 @@ def passthrough_env_presence(cfg: Dict[str, Any]) -> Dict[str, bool]:
 
 def passthrough_env_sources(cfg: Dict[str, Any]) -> Dict[str, str]:
     settings_path = resolve_settings_host_path(cfg)
-    settings_api_key = extract_anthropic_api_key_from_settings(settings_path)
     settings_auth_token = extract_anthropic_auth_token_from_settings(settings_path)
     settings_env_values = extract_settings_env_values(settings_path)
     sources: Dict[str, str] = {}
@@ -837,9 +920,6 @@ def passthrough_env_sources(cfg: Dict[str, Any]) -> Dict[str, str]:
             continue
         if name in settings_env_values and settings_env_values[name]:
             sources[name] = "settings_env"
-            continue
-        if name == "ANTHROPIC_API_KEY" and settings_api_key:
-            sources[name] = "settings_file"
             continue
         if name == "ANTHROPIC_AUTH_TOKEN" and settings_auth_token:
             sources[name] = "settings_file"
@@ -931,6 +1011,40 @@ def trim_text(value: str, max_len: int) -> str:
     if len(value) <= max_len:
         return value
     return value[: max_len - 3] + "..."
+
+
+def _last_matching_index(lines: list[str], predicate) -> int:
+    for idx in range(len(lines) - 1, -1, -1):
+        if predicate(lines[idx]):
+            return idx
+    return -1
+
+
+def resolve_worker_state_from_logs(base_state: str, recent_lines: list[str]) -> str:
+    if base_state != "alive":
+        return base_state
+    if not recent_lines:
+        return base_state
+
+    lower_lines = [line.lower() for line in recent_lines]
+    auth_markers = ("auth_missing", "auth_required", "not logged in", "please run /login")
+
+    last_auth_issue = _last_matching_index(lower_lines, lambda line: any(marker in line for marker in auth_markers))
+    if last_auth_issue < 0:
+        return base_state
+
+    last_cycle_end = _last_matching_index(lower_lines, lambda line: "cycle_end" in line)
+    if last_cycle_end >= 0 and last_cycle_end > last_auth_issue:
+        return base_state
+
+    last_cycle_end_ok = _last_matching_index(
+        lower_lines,
+        lambda line: "cycle_end" in line and "exit_code=0" in line,
+    )
+    if last_cycle_end_ok >= 0 and last_cycle_end_ok > last_auth_issue:
+        return base_state
+
+    return "auth_missing"
 
 
 def collect_claude_processes(container_name: str) -> list[Dict[str, str]]:
@@ -1070,9 +1184,7 @@ def probe_claude_worker(repo: Path, container_name: str) -> Dict[str, Any]:
             last_line = trim_text(lines[-1], 140)
             recent_lines = lines[-80:]
 
-    auth_markers = ("auth_missing", "auth_required", "not logged in", "please run /login")
-    if any(any(marker in line.lower() for marker in auth_markers) for line in recent_lines):
-        state = "auth_missing"
+    state = resolve_worker_state_from_logs(state, recent_lines)
 
     return {
         "container": container_name,
@@ -1123,9 +1235,8 @@ def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -
         "      done\n"
         "    fi\n"
         "    AUTH_READY=0\n"
-        "    if [ -n \"${ANTHROPIC_API_KEY:-}\" ]; then AUTH_READY=1; fi\n"
-        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -n \"${ANTHROPIC_AUTH_TOKEN:-}\" ]; then AUTH_READY=1; fi\n"
-        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -f \"$HOME/.claude/settings.json\" ] && grep -qiE 'anthropic[_-]*(api[_-]*key|auth[_-]*token)' \"$HOME/.claude/settings.json\" 2>/dev/null; then AUTH_READY=1; fi\n"
+        "    if [ -n \"${ANTHROPIC_AUTH_TOKEN:-}\" ]; then AUTH_READY=1; fi\n"
+        "    if [ \"$AUTH_READY\" -ne 1 ] && [ -f \"$HOME/.claude/settings.json\" ] && grep -qiE 'anthropic[_-]*auth[_-]*token' \"$HOME/.claude/settings.json\" 2>/dev/null; then AUTH_READY=1; fi\n"
         "    if [ \"$AUTH_READY\" -ne 1 ]; then\n"
         "      for AUTH_DIR in \"$HOME/.claude\" \"$HOME/.config/claude\" \"$HOME/.config/claude-code\" \"$HOME/.config/@anthropic-ai/claude-code\"; do\n"
         "        if [ -d \"$AUTH_DIR\" ] && find \"$AUTH_DIR\" -maxdepth 4 -type f \\( -name '*auth*.json' -o -name '*credential*.json' -o -name '*token*.json' \\) | grep -q .; then\n"
@@ -1438,6 +1549,11 @@ def loop(repo: Path) -> None:
     try:
         while not stop_file.exists():
             iteration += 1
+            container_names: list[str] = []
+            states: Dict[str, str] = {}
+            worker_statuses: Dict[str, Dict[str, Any]] = {}
+            phase = "runtime_degraded"
+            reason = "unknown"
             try:
                 container_names = ensure_runtime_containers(repo, cfg)
                 states = {name: docker_container_state(name) for name in container_names}
@@ -1480,8 +1596,18 @@ def loop(repo: Path) -> None:
                         "container_count": len(container_names),
                     },
                 )
+                capture_iteration_history(
+                    repo,
+                    iteration=iteration,
+                    phase=phase,
+                    reason=reason,
+                    container_names=container_names,
+                    states=states,
+                    worker_statuses=worker_statuses,
+                )
             except Exception as exc:
                 err = str(exc).strip() or exc.__class__.__name__
+                reason = err
                 set_status(
                     repo,
                     phase="runtime_degraded",
@@ -1492,6 +1618,15 @@ def loop(repo: Path) -> None:
                 )
                 runtime_log("runtime_error", iteration=iteration, error=err)
                 append_live(repo, {"event": "runtime_error", "iteration": iteration, "error": err})
+                capture_iteration_history(
+                    repo,
+                    iteration=iteration,
+                    phase="runtime_degraded",
+                    reason=reason,
+                    container_names=container_names,
+                    states=states,
+                    worker_statuses=worker_statuses,
+                )
             time.sleep(sleep_sec)
     finally:
         stop_runtime_containers(repo)
@@ -1728,7 +1863,6 @@ def cmd_doctor(repo: Path) -> None:
     env_sources = passthrough_env_sources(cfg)
     effective_settings = resolve_settings_host_path(cfg)
     effective_host_claude_dir = resolve_host_claude_dir(cfg)
-    settings_key_present = bool(extract_anthropic_api_key_from_settings(effective_settings))
     settings_auth_token_present = bool(extract_anthropic_auth_token_from_settings(effective_settings))
     settings_env_keys = sorted(extract_settings_env_values(effective_settings).keys())
     host_auth_files = sorted(detect_host_claude_auth_files().keys())
@@ -1771,7 +1905,6 @@ def cmd_doctor(repo: Path) -> None:
         "passthrough_env_sources": env_sources,
         "settings_host_path_effective": str(effective_settings) if effective_settings else "",
         "host_claude_dir_effective": str(effective_host_claude_dir) if effective_host_claude_dir else "",
-        "settings_contains_anthropic_key": settings_key_present,
         "settings_contains_anthropic_auth_token": settings_auth_token_present,
         "settings_env_keys": settings_env_keys,
         "host_auth_files_detected": host_auth_files,
