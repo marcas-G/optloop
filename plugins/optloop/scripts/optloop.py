@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+import filecmp
 import hashlib
 import json
 import os
@@ -163,16 +164,16 @@ def save_config(repo: Path, cfg: Dict[str, Any]) -> None:
     write_json(state_paths(repo)["config"], cfg)
 
 
-def sync_tree_missing_only(src: Path, dst: Path) -> None:
+def sync_tree_overlay(src: Path, dst: Path) -> None:
     if not src.exists():
         return
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.iterdir():
         target = dst / item.name
         if item.is_dir():
-            sync_tree_missing_only(item, target)
+            sync_tree_overlay(item, target)
         else:
-            if not target.exists():
+            if not target.exists() or not filecmp.cmp(item, target, shallow=False):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target)
 
@@ -200,7 +201,7 @@ def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> Non
     paths["runtime_home"].mkdir(parents=True, exist_ok=True)
     paths["runtime_claude_dir"].mkdir(parents=True, exist_ok=True)
 
-    sync_tree_missing_only(RUNTIME_TEMPLATE_DIR, paths["runtime_claude_dir"])
+    sync_tree_overlay(RUNTIME_TEMPLATE_DIR, paths["runtime_claude_dir"])
 
     if cfg is None:
         cfg = load_config(repo)

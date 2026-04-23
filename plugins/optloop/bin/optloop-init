@@ -14,6 +14,27 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+file_fingerprint() {
+  local path="$1"
+  local out=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum "$path")"
+    printf '%s' "${out%% *}"
+  elif command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 "$path")"
+    printf '%s' "${out%% *}"
+  else
+    out="$(cksum "$path")"
+    printf 'cksum-%s' "${out%% *}"
+  fi
+}
+
+container_mount_source() {
+  local container="$1"
+  local destination="$2"
+  docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.Source}}{{end}}{{end}}" "$container" 2>/dev/null || true
+}
+
 sanitize_name() {
   local raw="$1"
   raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
@@ -25,22 +46,25 @@ sanitize_name() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+PROJECT_DIR_RAW="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+[ -d "$PROJECT_DIR_RAW" ] || fail "project dir does not exist: $PROJECT_DIR_RAW"
+PROJECT_DIR="$(cd "$PROJECT_DIR_RAW" && pwd -P)"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 SAFE_PROJECT_NAME="$(sanitize_name "$PROJECT_NAME")"
 
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$DEFAULT_PLUGIN_ROOT}"
+PLUGIN_ROOT_RAW="${CLAUDE_PLUGIN_ROOT:-$DEFAULT_PLUGIN_ROOT}"
+[ -d "$PLUGIN_ROOT_RAW" ] || fail "plugin root does not exist: $PLUGIN_ROOT_RAW"
+PLUGIN_ROOT="$(cd "$PLUGIN_ROOT_RAW" && pwd -P)"
 PLUGIN_DATA_DEFAULT="${HOME:-$PROJECT_DIR/.optloop}/.claude/plugins/data/optloop/${SAFE_PROJECT_NAME}"
-PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:-$PLUGIN_DATA_DEFAULT}"
+PLUGIN_DATA_RAW="${CLAUDE_PLUGIN_DATA:-$PLUGIN_DATA_DEFAULT}"
+mkdir -p "$PLUGIN_DATA_RAW"
+PLUGIN_DATA="$(cd "$PLUGIN_DATA_RAW" && pwd -P)"
 
 need_cmd bash
 need_cmd docker
 need_cmd sed
 need_cmd tr
 need_cmd find
-
-[ -d "$PROJECT_DIR" ] || fail "project dir does not exist: $PROJECT_DIR"
-[ -d "$PLUGIN_ROOT" ] || fail "plugin root does not exist: $PLUGIN_ROOT"
 
 IMAGE_TAG_DEFAULT="optloop-${SAFE_PROJECT_NAME}:local"
 CONTAINER_NAME_DEFAULT="optloop-${SAFE_PROJECT_NAME}"
@@ -54,10 +78,17 @@ LOG_DIR="${RUNTIME_ROOT}/logs"
 WORK_DIR="${RUNTIME_ROOT}/work"
 CONFIG_DIR="${PLUGIN_DATA}/config"
 CACHE_DIR="${PLUGIN_DATA}/cache"
+LOCK_DIR="${RUNTIME_ROOT}/locks"
 BIN_DIR="${PLUGIN_ROOT}/bin"
 ENV_FILE="${CONFIG_DIR}/paths.env"
 
-mkdir -p "$STATE_DIR" "$LOG_DIR" "$WORK_DIR" "$CONFIG_DIR" "$CACHE_DIR"
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$WORK_DIR" "$CONFIG_DIR" "$CACHE_DIR" "$LOCK_DIR"
+
+INIT_LOCK="${LOCK_DIR}/init.lock"
+if ! mkdir "$INIT_LOCK" 2>/dev/null; then
+  fail "another optloop init is already running for this project: $INIT_LOCK"
+fi
+trap 'rm -rf "$INIT_LOCK"' EXIT
 
 # 1) repair executable permissions for bundled scripts
 if [ -d "$BIN_DIR" ]; then
@@ -79,6 +110,7 @@ do
 done
 
 [ -n "$DOCKERFILE_PATH" ] || fail "no Dockerfile found under $PROJECT_DIR and no bundled Dockerfile.example found"
+DOCKERFILE_SHA="$(file_fingerprint "$DOCKERFILE_PATH")"
 
 # 3) write persistent path/env config
 cat > "$ENV_FILE" <<EOF
@@ -91,6 +123,7 @@ LOG_DIR=$LOG_DIR
 WORK_DIR=$WORK_DIR
 CACHE_DIR=$CACHE_DIR
 DOCKERFILE_PATH=$DOCKERFILE_PATH
+DOCKERFILE_SHA=$DOCKERFILE_SHA
 IMAGE_TAG=$IMAGE_TAG
 CONTAINER_NAME=$CONTAINER_NAME
 EOF
@@ -98,24 +131,64 @@ EOF
 IMAGE_STATUS="reused"
 CONTAINER_STATUS="reused"
 
-# 4) build image if missing
-if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+# 4) build image if missing or stale
+IMAGE_EXISTS="false"
+IMAGE_DOCKERFILE_SHA=""
+if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+  IMAGE_EXISTS="true"
+  IMAGE_DOCKERFILE_SHA="$(docker image inspect -f '{{ index .Config.Labels "optloop.dockerfile_sha" }}' "$IMAGE_TAG" 2>/dev/null || true)"
+fi
+
+if [ "$IMAGE_EXISTS" != "true" ]; then
   info "building image $IMAGE_TAG from $DOCKERFILE_PATH"
   docker build \
     -f "$DOCKERFILE_PATH" \
+    --label "optloop.project_dir=$PROJECT_DIR" \
+    --label "optloop.plugin_root=$PLUGIN_ROOT" \
+    --label "optloop.dockerfile_path=$DOCKERFILE_PATH" \
+    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
     -t "$IMAGE_TAG" \
     "$PROJECT_DIR"
   IMAGE_STATUS="built"
+elif [ "${OPTLOOP_REBUILD_IMAGE:-0}" = "1" ] || [ "$IMAGE_DOCKERFILE_SHA" != "$DOCKERFILE_SHA" ]; then
+  info "rebuilding image $IMAGE_TAG from $DOCKERFILE_PATH"
+  docker build \
+    -f "$DOCKERFILE_PATH" \
+    --label "optloop.project_dir=$PROJECT_DIR" \
+    --label "optloop.plugin_root=$PLUGIN_ROOT" \
+    --label "optloop.dockerfile_path=$DOCKERFILE_PATH" \
+    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
+    -t "$IMAGE_TAG" \
+    "$PROJECT_DIR"
+  IMAGE_STATUS="rebuilt"
 else
   info "image already exists: $IMAGE_TAG"
 fi
+TARGET_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG")"
 
-# 5) create container if missing
+# 5) create container if missing or incompatible
+if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+  ACTUAL_PROJECT_MOUNT="$(container_mount_source "$CONTAINER_NAME" "/workspace")"
+  ACTUAL_PLUGIN_DATA_MOUNT="$(container_mount_source "$CONTAINER_NAME" "/opt/optloop-data")"
+  ACTUAL_IMAGE_ID="$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  if [ "$ACTUAL_PROJECT_MOUNT" != "$PROJECT_DIR" ] || \
+     [ "$ACTUAL_PLUGIN_DATA_MOUNT" != "$PLUGIN_DATA" ] || \
+     [ "$ACTUAL_IMAGE_ID" != "$TARGET_IMAGE_ID" ]; then
+    info "recreating container $CONTAINER_NAME because image or mounts changed"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+    CONTAINER_STATUS="recreated"
+  fi
+fi
+
 if ! docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   info "creating container $CONTAINER_NAME"
   docker create \
     --name "$CONTAINER_NAME" \
     -w /workspace \
+    --label "optloop.project_dir=$PROJECT_DIR" \
+    --label "optloop.plugin_root=$PLUGIN_ROOT" \
+    --label "optloop.plugin_data=$PLUGIN_DATA" \
+    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
     -v "$PROJECT_DIR:/workspace" \
     -v "$PLUGIN_DATA:/opt/optloop-data" \
     -e OPTLOOP_PROJECT_DIR=/workspace \
@@ -123,7 +196,11 @@ if ! docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
     -e PYTHONPATH=/workspace:/workspace/src \
     "$IMAGE_TAG" \
     tail -f /dev/null >/dev/null
-  CONTAINER_STATUS="created"
+  if [ "$CONTAINER_STATUS" = "recreated" ]; then
+    CONTAINER_STATUS="recreated"
+  else
+    CONTAINER_STATUS="created"
+  fi
 fi
 
 # 6) start container if stopped
@@ -135,6 +212,8 @@ if [ "$RUNNING_STATE" != "true" ]; then
     CONTAINER_STATUS="started"
   elif [ "$CONTAINER_STATUS" = "created" ]; then
     CONTAINER_STATUS="created+started"
+  elif [ "$CONTAINER_STATUS" = "recreated" ]; then
+    CONTAINER_STATUS="recreated+started"
   fi
 else
   info "container already running: $CONTAINER_NAME"
