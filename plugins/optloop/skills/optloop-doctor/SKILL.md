@@ -7,19 +7,16 @@ description: Run deterministic OptLoop diagnostics for the current repository. U
 
 ## Action
 
-Run exactly this shell block:
+Run one Bash command using the installed plugin root absolute path:
 
-```bash
-set -euo pipefail
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/optloop" ]; then
-  bash "${CLAUDE_PLUGIN_ROOT}/bin/optloop" doctor
-elif command -v optloop >/dev/null 2>&1; then
-  bash "$(command -v optloop)" doctor
-else
-  echo "optloop error: cannot locate optloop. Reinstall the optloop plugin." >&2
-  exit 127
-fi
+```text
+bash <installed-plugin-root>/bin/optloop doctor
 ```
+
+Before calling Bash, replace `<installed-plugin-root>` with the absolute path
+of this installed plugin directory. The final Bash command must not contain
+shell expansion, command substitution, fallback probing, globs, or environment
+variable references.
 
 ## Rules
 

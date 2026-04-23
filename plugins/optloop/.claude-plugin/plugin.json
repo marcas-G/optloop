@@ -1,6 +1,6 @@
 {
   "name": "optloop",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Lean outer supervisor for isolated non-bare Claude runtime hosting.",
   "entrypoint": "bin/optloop"
 }
