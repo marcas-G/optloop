@@ -222,10 +222,10 @@ def sync_tree_overlay(src: Path, dst: Path) -> None:
                 shutil.copy2(item, target)
 
 
-def copy_user_settings_into_runtime(repo: Path, overwrite: bool = False) -> None:
+def copy_user_settings_into_runtime(repo: Path, cfg: Optional[Dict[str, Any]] = None, overwrite: bool = False) -> None:
     paths = state_paths(repo)
 
-    user_settings = detect_host_claude_settings_path()
+    user_settings = resolve_settings_host_path(cfg)
     if user_settings is None:
         return
     runtime_settings = paths["runtime_claude_dir"] / "settings.json"
@@ -256,18 +256,77 @@ def detect_host_claude_settings_path() -> Optional[Path]:
     return None
 
 
+def resolve_settings_host_path(cfg: Optional[Dict[str, Any]] = None) -> Optional[Path]:
+    if cfg is not None:
+        execution = cfg.get("execution", {})
+        configured = str(execution.get("settings_host_path", "")).strip()
+        if configured:
+            candidate = Path(configured).expanduser()
+            if candidate.exists() and candidate.is_file():
+                return candidate.resolve()
+    return detect_host_claude_settings_path()
+
+
+def extract_anthropic_api_key_from_settings(settings_path: Optional[Path]) -> Optional[str]:
+    if settings_path is None:
+        return None
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+
+    key_names = {"anthropic_api_key", "anthropicapikey", "api_key", "apikey"}
+
+    def walk(node: Any) -> Optional[str]:
+        if isinstance(node, dict):
+            env_block = node.get("env")
+            if isinstance(env_block, dict):
+                value = env_block.get("ANTHROPIC_API_KEY") or env_block.get("anthropic_api_key")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            for k, v in node.items():
+                key_norm = str(k).strip().replace("-", "_").lower()
+                if key_norm in key_names or str(k).strip().upper() == "ANTHROPIC_API_KEY":
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                found = walk(v)
+                if found:
+                    return found
+            return None
+        if isinstance(node, list):
+            for item in node:
+                found = walk(item)
+                if found:
+                    return found
+            return None
+        return None
+
+    return walk(data)
+
+
 def detect_host_claude_auth_files() -> Dict[str, Path]:
     home = Path.home()
-    auth_names = [
-        ".credentials.json",
-        "credentials.json",
-        "auth.json",
+    preferred = [
+        home / ".claude" / ".credentials.json",
+        home / ".claude" / "credentials.json",
+        home / ".claude" / "auth.json",
+        home / ".config" / "claude" / "auth.json",
+        home / ".config" / "claude-code" / "auth.json",
+        home / ".config" / "claude-code" / ".credentials.json",
     ]
     files: Dict[str, Path] = {}
-    for name in auth_names:
-        path = home / ".claude" / name
+    for path in preferred:
         if path.exists() and path.is_file():
-            files[name] = path.resolve()
+            files.setdefault(path.name, path.resolve())
+
+    for base in [home / ".claude", home / ".config" / "claude", home / ".config" / "claude-code"]:
+        if not base.exists() or not base.is_dir():
+            continue
+        for pattern in ["*auth*.json", "*credential*.json"]:
+            for path in sorted(base.glob(pattern)):
+                if path.is_file():
+                    files.setdefault(path.name, path.resolve())
+
     return files
 
 
@@ -301,6 +360,7 @@ def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> Non
     if runtime_cfg.get("copy_user_settings", True):
         copy_user_settings_into_runtime(
             repo,
+            cfg=cfg,
             overwrite=runtime_cfg.get("overwrite_user_settings", True),
         )
     if runtime_cfg.get("copy_user_auth", True):
@@ -522,6 +582,8 @@ def runtime_container_names(repo: Path, cfg: Dict[str, Any]) -> list[str]:
 
 
 def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
+    settings_path = resolve_settings_host_path(cfg)
+    settings_api_key = extract_anthropic_api_key_from_settings(settings_path)
     values: Dict[str, str] = {}
     for key in cfg.get("execution", {}).get("passthrough_env", []):
         name = str(key).strip()
@@ -530,17 +592,39 @@ def passthrough_env_values(cfg: Dict[str, Any]) -> Dict[str, str]:
         value = os.environ.get(name)
         if value:
             values[name] = value
+            continue
+        if name == "ANTHROPIC_API_KEY" and settings_api_key:
+            values[name] = settings_api_key
     return values
 
 
 def passthrough_env_presence(cfg: Dict[str, Any]) -> Dict[str, bool]:
     presence: Dict[str, bool] = {}
+    values = passthrough_env_values(cfg)
     for key in cfg.get("execution", {}).get("passthrough_env", []):
         name = str(key).strip()
         if not name:
             continue
-        presence[name] = bool(os.environ.get(name))
+        presence[name] = name in values and bool(values[name])
     return presence
+
+
+def passthrough_env_sources(cfg: Dict[str, Any]) -> Dict[str, str]:
+    settings_path = resolve_settings_host_path(cfg)
+    settings_api_key = extract_anthropic_api_key_from_settings(settings_path)
+    sources: Dict[str, str] = {}
+    for key in cfg.get("execution", {}).get("passthrough_env", []):
+        name = str(key).strip()
+        if not name:
+            continue
+        if os.environ.get(name):
+            sources[name] = "environment"
+            continue
+        if name == "ANTHROPIC_API_KEY" and settings_api_key:
+            sources[name] = "settings_file"
+            continue
+        sources[name] = "missing"
+    return sources
 
 
 def run(
@@ -1397,6 +1481,9 @@ def cmd_doctor(repo: Path) -> None:
     docker_visible = docker_available()
     runtime_states = {name: docker_container_state(name) for name in runtime_names}
     env_presence = passthrough_env_presence(cfg)
+    env_sources = passthrough_env_sources(cfg)
+    effective_settings = resolve_settings_host_path(cfg)
+    settings_key_present = bool(extract_anthropic_api_key_from_settings(effective_settings))
     host_auth_files = sorted(detect_host_claude_auth_files().keys())
     if docker_visible:
         worker_states = {name: probe_claude_worker(repo, name) for name in runtime_names}
@@ -1430,6 +1517,9 @@ def cmd_doctor(repo: Path) -> None:
         "claude_skip_permissions": claude_skip_permissions(cfg),
         "claude_restart_delay_sec": claude_restart_delay_sec(cfg),
         "passthrough_env_present": env_presence,
+        "passthrough_env_sources": env_sources,
+        "settings_host_path_effective": str(effective_settings) if effective_settings else "",
+        "settings_contains_anthropic_key": settings_key_present,
         "host_auth_files_detected": host_auth_files,
         "container_workers": worker_states,
         "worker_image": cfg["execution"].get("image"),

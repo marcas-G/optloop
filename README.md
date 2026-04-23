@@ -1,6 +1,6 @@
 # optloop-marketplace
 
-Current plugin version: `0.1.23`
+Current plugin version: `0.1.25`
 
 This repository contains the OptLoop marketplace plugin. The current implementation is an outer supervisor that runs in the host project and orchestrates Docker runtime containers plus in-container Claude workers.
 
@@ -43,9 +43,16 @@ Container naming:
 Worker auth sources:
 
 1. `ANTHROPIC_API_KEY` from host env (via `execution.passthrough_env`).
-2. Claude login credentials inside container runtime home.
+2. `ANTHROPIC_API_KEY` found in host settings file (if present) and injected as passthrough env.
+3. Claude login credentials inside container runtime home.
 
 If missing, worker state becomes `auth_missing` and retries slowly instead of tight failing loops.
+
+By default, runtime sync also copies host auth files when found (`copy_user_auth=true`):
+
+- `.credentials.json`
+- `credentials.json`
+- `auth.json`
 
 Settings file behavior:
 
