@@ -40,6 +40,19 @@ pid_is_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+wait_for_container_absent() {
+  local name="$1"
+  local timeout_sec="${2:-30}"
+  local deadline=$((SECONDS + timeout_sec))
+  while [ "$SECONDS" -le "$deadline" ]; do
+    if ! docker container inspect "$name" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
 acquire_init_lock() {
   local lock_dir="$1"
   local pid_file="$lock_dir/pid"
@@ -194,41 +207,55 @@ fi
 # 5) always create a fresh container for the current plugin/project state
 if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   info "removing existing container: $CONTAINER_NAME"
-  docker rm -f "$CONTAINER_NAME" >/dev/null
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  if ! wait_for_container_absent "$CONTAINER_NAME" 30; then
+    fail "container removal did not finish in time: $CONTAINER_NAME"
+  fi
   CONTAINER_STATUS="recreated"
 fi
 
-info "creating container $CONTAINER_NAME"
-docker create \
-  --name "$CONTAINER_NAME" \
-  -w /workspace \
-  --label "optloop.project_dir=$PROJECT_DIR" \
-  --label "optloop.plugin_root=$PLUGIN_ROOT" \
-  --label "optloop.plugin_data=$PLUGIN_DATA" \
-  --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
-  -v "$PROJECT_DIR:/workspace" \
-  -v "$PLUGIN_DATA:/opt/optloop-data" \
-  -e OPTLOOP_PROJECT_DIR=/workspace \
-  -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
-  -e PYTHONPATH=/workspace:/workspace/src \
-  "$IMAGE_TAG" \
-  tail -f /dev/null >/dev/null
-
-# 6) start container if stopped
-RUNNING_STATE="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")"
-if [ "$RUNNING_STATE" != "true" ]; then
-  info "starting container $CONTAINER_NAME"
-  docker start "$CONTAINER_NAME" >/dev/null
-  if [ "$CONTAINER_STATUS" = "created" ]; then
-    CONTAINER_STATUS="created+started"
-  elif [ "$CONTAINER_STATUS" = "recreated" ]; then
-    CONTAINER_STATUS="recreated+started"
+attempt=1
+max_attempts=4
+while [ "$attempt" -le "$max_attempts" ]; do
+  info "creating+starting container $CONTAINER_NAME (attempt $attempt/$max_attempts)"
+  RUN_OUTPUT="$(docker run -d \
+    --name "$CONTAINER_NAME" \
+    -w /workspace \
+    --label "optloop.project_dir=$PROJECT_DIR" \
+    --label "optloop.plugin_root=$PLUGIN_ROOT" \
+    --label "optloop.plugin_data=$PLUGIN_DATA" \
+    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
+    -v "$PROJECT_DIR:/workspace" \
+    -v "$PLUGIN_DATA:/opt/optloop-data" \
+    -e OPTLOOP_PROJECT_DIR=/workspace \
+    -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
+    -e PYTHONPATH=/workspace:/workspace/src \
+    "$IMAGE_TAG" \
+    tail -f /dev/null 2>&1)" && RUN_RC=0 || RUN_RC=$?
+  if [ "$RUN_RC" -eq 0 ]; then
+    if [ "$CONTAINER_STATUS" = "created" ]; then
+      CONTAINER_STATUS="created+started"
+    elif [ "$CONTAINER_STATUS" = "recreated" ]; then
+      CONTAINER_STATUS="recreated+started"
+    fi
+    break
   fi
-else
-  info "container already running: $CONTAINER_NAME"
-fi
 
-# 7) compact status summary
+  if [ "$attempt" -eq "$max_attempts" ]; then
+    fail "failed to create/start container after $max_attempts attempts: $CONTAINER_NAME"
+  fi
+
+  if [ -n "${RUN_OUTPUT:-}" ]; then
+    info "docker run failed output: $RUN_OUTPUT"
+  fi
+  info "container startup failed, clearing residual state: $CONTAINER_NAME"
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  wait_for_container_absent "$CONTAINER_NAME" 30 || true
+  sleep 1
+  attempt=$((attempt + 1))
+done
+
+# 6) compact status summary
 cat <<EOF
 [optloop-init] project_dir=$PROJECT_DIR
 [optloop-init] plugin_root=$PLUGIN_ROOT

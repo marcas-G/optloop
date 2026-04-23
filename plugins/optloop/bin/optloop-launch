@@ -9,6 +9,16 @@ OPTLOOP_INIT="$SELF_DIR/optloop-init"
 cd "$REPO_ROOT"
 mkdir -p .optloop/logs
 
+PID_FILE=".optloop/runner.pid"
+if [ -f "$PID_FILE" ]; then
+  PID="$(tr -d '[:space:]' < "$PID_FILE" || true)"
+  if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null; then
+    echo "optloop already running pid=$PID"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
+fi
+
 if [ ! -x "$OPTLOOP_BIN" ]; then
   chmod +x "$OPTLOOP_BIN" 2>/dev/null || true
 fi
@@ -24,16 +34,6 @@ if [ -f "$OPTLOOP_INIT" ]; then
 fi
 
 bash "$OPTLOOP_BIN" init >/dev/null 2>&1 || true
-
-PID_FILE=".optloop/runner.pid"
-if [ -f "$PID_FILE" ]; then
-  PID="$(tr -d '[:space:]' < "$PID_FILE" || true)"
-  if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null; then
-    echo "optloop already running pid=$PID"
-    exit 0
-  fi
-  rm -f "$PID_FILE"
-fi
 
 printf '[optloop-launch] new background run started at %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > .optloop/logs/controller.out
 nohup env PYTHONUNBUFFERED=1 bash "$OPTLOOP_BIN" start \

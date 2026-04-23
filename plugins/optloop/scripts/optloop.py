@@ -237,6 +237,9 @@ def init_repo(repo: Path) -> None:
             "rejected_total": 0,
             "active_candidates": {},
             "execution_mode": cfg["execution"]["mode"],
+            "target_parallel_containers": target_parallel_containers(cfg),
+            "runtime_containers": [],
+            "runtime_container_count": 0,
         })
 
     if not paths["live"].exists():
@@ -267,11 +270,42 @@ def set_status(repo: Path, **updates: Any) -> Dict[str, Any]:
         "rejected_total": 0,
         "active_candidates": {},
         "execution_mode": load_config(repo)["execution"]["mode"],
+        "target_parallel_containers": 1,
+        "runtime_containers": [],
+        "runtime_container_count": 0,
     })
     status.update(updates)
     status["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     write_json(paths["status"], status)
     return status
+
+
+def parse_non_negative_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
+def runtime_log(event: str, **fields: Any) -> None:
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tail = " ".join(f"{k}={json.dumps(v, ensure_ascii=False)}" for k, v in fields.items())
+    if tail:
+        print(f"[optloop] {ts} {event} {tail}", flush=True)
+    else:
+        print(f"[optloop] {ts} {event}", flush=True)
+
+
+def console_safe_text(text: str) -> str:
+    enc = sys.stdout.encoding or "utf-8"
+    try:
+        text.encode(enc)
+        return text
+    except Exception:
+        return text.encode(enc, errors="replace").decode(enc, errors="replace")
 
 
 def repo_key(repo: Path) -> str:
@@ -300,13 +334,49 @@ def runtime_container_name(repo: Path) -> str:
     return f"optloop-{sanitize_name(repo.name)}"
 
 
-def run(cmd: list[str], cwd: Optional[Path] = None, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        text=True,
-        capture_output=capture,
-    )
+def positive_int(value: Any, default: int, minimum: int = 1, maximum: int = 64) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    if parsed < minimum:
+        parsed = minimum
+    if parsed > maximum:
+        parsed = maximum
+    return parsed
+
+
+def target_parallel_containers(cfg: Dict[str, Any]) -> int:
+    loop_cfg = cfg.get("loop", {})
+    return positive_int(loop_cfg.get("parallel_candidates", 1), default=1, minimum=1, maximum=64)
+
+
+def runtime_container_names(repo: Path, cfg: Dict[str, Any]) -> list[str]:
+    base = runtime_container_name(repo)
+    total = target_parallel_containers(cfg)
+    names = [base]
+    for idx in range(2, total + 1):
+        names.append(f"{base}-{idx}")
+    return names
+
+
+def run(
+    cmd: list[str],
+    cwd: Optional[Path] = None,
+    check: bool = True,
+    capture: bool = True,
+    timeout_sec: Optional[int] = 120,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            text=True,
+            capture_output=capture,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OptLoopError(f"Command timed out after {timeout_sec}s: {' '.join(cmd)}") from exc
     if check and proc.returncode != 0:
         raise OptLoopError(
             f"Command failed ({proc.returncode}): {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
@@ -323,18 +393,131 @@ def docker_available() -> bool:
 
 
 def docker_image_exists(image: str) -> bool:
-    proc = run(["docker", "image", "inspect", image], check=False)
+    try:
+        proc = run(["docker", "image", "inspect", image], check=False)
+    except Exception:
+        return False
     return proc.returncode == 0
 
 
 def docker_container_state(name: str) -> str:
-    proc = run(["docker", "inspect", "-f", "{{.State.Status}}", name], check=False)
+    try:
+        proc = run(["docker", "inspect", "-f", "{{.State.Status}}", name], check=False)
+    except Exception:
+        return "docker-unavailable"
     if proc.returncode != 0:
         return "missing"
     return (proc.stdout or "").strip() or "unknown"
 
 
-def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
+def format_table(headers: list[str], rows: list[list[str]]) -> str:
+    normalized: list[list[str]] = []
+    for row in rows:
+        cells = [str(cell) for cell in row]
+        if len(cells) < len(headers):
+            cells += [""] * (len(headers) - len(cells))
+        normalized.append(cells[: len(headers)])
+
+    widths = [len(h) for h in headers]
+    for row in normalized:
+        for idx, cell in enumerate(row):
+            if len(cell) > widths[idx]:
+                widths[idx] = len(cell)
+
+    def border(fill: str = "-") -> str:
+        return "+" + "+".join(fill * (w + 2) for w in widths) + "+"
+
+    lines = [
+        border("-"),
+        "| " + " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + " |",
+        border("="),
+    ]
+    for row in normalized:
+        lines.append("| " + " | ".join(row[i].ljust(widths[i]) for i in range(len(headers))) + " |")
+    lines.append(border("-"))
+    return "\n".join(lines)
+
+
+def trim_text(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
+
+
+def collect_claude_processes(container_name: str) -> list[Dict[str, str]]:
+    if not container_name:
+        return []
+    if not docker_available():
+        return []
+    if docker_container_state(container_name) != "running":
+        return []
+
+    proc = run(
+        [
+            "docker",
+            "exec",
+            container_name,
+            "sh",
+            "-lc",
+            "ps -eo pid,ppid,etime,args --no-headers",
+        ],
+        check=False,
+    )
+    if proc.returncode != 0:
+        return []
+
+    rows: list[Dict[str, str]] = []
+    for raw in (proc.stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid, ppid, etime, args = parts
+        lower_args = args.lower()
+        if "claude" not in lower_args and "anthropic" not in lower_args:
+            continue
+        rows.append({
+            "container": container_name,
+            "pid": pid,
+            "ppid": ppid,
+            "etime": etime,
+            "command": args,
+        })
+
+    rows.sort(key=lambda row: int(row["pid"]) if row["pid"].isdigit() else 0)
+    return rows
+
+
+def collect_claude_processes_for_containers(container_names: list[str]) -> list[Dict[str, str]]:
+    all_rows: list[Dict[str, str]] = []
+    for name in container_names:
+        all_rows.extend(collect_claude_processes(name))
+    all_rows.sort(key=lambda row: (row.get("container", ""), int(row["pid"]) if row["pid"].isdigit() else 0))
+    return all_rows
+
+
+def list_runtime_containers(repo: Path) -> list[str]:
+    if not docker_available():
+        return []
+    base = runtime_container_name(repo)
+    proc = run(["docker", "ps", "-a", "--format", "{{.Names}}"], check=False)
+    if proc.returncode != 0:
+        return []
+
+    names: list[str] = []
+    for raw in (proc.stdout or "").splitlines():
+        name = raw.strip()
+        if not name:
+            continue
+        if name == base or name.startswith(base + "-"):
+            names.append(name)
+    names.sort()
+    return names
+
+
+def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
     if cfg["execution"].get("mode") != "docker":
         return "local"
     if not docker_available():
@@ -346,7 +529,6 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
 
     ensure_runtime_pack(repo, cfg)
     paths = state_paths(repo)
-    name = runtime_container_name(repo)
     state = docker_container_state(name)
 
     runtime_cfg = cfg.get("runtime", {})
@@ -425,10 +607,27 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
     return name
 
 
-def stop_runtime_container(repo: Path) -> None:
-    name = runtime_container_name(repo)
-    state = docker_container_state(name)
-    if state != "missing":
+def ensure_runtime_containers(repo: Path, cfg: Dict[str, Any]) -> list[str]:
+    if cfg["execution"].get("mode") != "docker":
+        return ["local"]
+
+    desired = runtime_container_names(repo, cfg)
+    for name in desired:
+        ensure_runtime_container(repo, cfg, name)
+
+    existing = list_runtime_containers(repo)
+    extras = [name for name in existing if name not in desired]
+    for name in extras:
+        run(["docker", "rm", "-f", name], check=False)
+
+    return desired
+
+
+def stop_runtime_containers(repo: Path) -> None:
+    if not docker_available():
+        return
+    names = list_runtime_containers(repo)
+    for name in names:
         run(["docker", "rm", "-f", name], check=False)
 
 
@@ -495,34 +694,103 @@ def handle_signal_factory(repo: Path):
 
 
 def loop(repo: Path) -> None:
-    cfg = load_config(repo)
     init_repo(repo)
+    cfg = load_config(repo)
+    target_parallel = target_parallel_containers(cfg)
+    sleep_sec = positive_int(cfg["loop"].get("sleep_between_iterations_sec", 5), default=5, minimum=1, maximum=3600)
     acquire_lock(repo)
     signal.signal(signal.SIGTERM, handle_signal_factory(repo))
     signal.signal(signal.SIGINT, handle_signal_factory(repo))
-    set_status(repo, phase="starting", execution_mode=cfg["execution"]["mode"])
-    append_live(repo, {"event": "runner_started", "pid": os.getpid(), "execution_mode": cfg["execution"]["mode"]})
+    previous_status = read_json(state_paths(repo)["status"], {})
+    iteration = parse_non_negative_int(previous_status.get("iteration"), default=0)
+    set_status(
+        repo,
+        phase="starting",
+        execution_mode=cfg["execution"]["mode"],
+        iteration=iteration,
+        target_parallel_containers=target_parallel,
+    )
+    runtime_log(
+        "runner_started",
+        pid=os.getpid(),
+        execution_mode=cfg["execution"]["mode"],
+        target_parallel_containers=target_parallel,
+        sleep_between_iterations_sec=sleep_sec,
+    )
+    append_live(
+        repo,
+        {
+            "event": "runner_started",
+            "pid": os.getpid(),
+            "execution_mode": cfg["execution"]["mode"],
+            "target_parallel_containers": target_parallel,
+        },
+    )
     stop_file = state_paths(repo)["stop"]
     try:
         while not stop_file.exists():
-            container_name = ensure_runtime_container(repo, cfg)
-            set_status(
-                repo,
-                phase="runtime_active",
-                execution_mode=cfg["execution"]["mode"],
-                runtime_container=container_name,
-                last_reason="runtime container healthy",
-            )
-            append_live(repo, {"event": "runtime_heartbeat", "container": container_name})
-            time.sleep(int(cfg["loop"].get("sleep_between_iterations_sec", 5)))
+            iteration += 1
+            try:
+                container_names = ensure_runtime_containers(repo, cfg)
+                states = {name: docker_container_state(name) for name in container_names}
+                set_status(
+                    repo,
+                    phase="runtime_active",
+                    iteration=iteration,
+                    execution_mode=cfg["execution"]["mode"],
+                    runtime_container=container_names[0] if container_names else "",
+                    runtime_containers=container_names,
+                    runtime_states=states,
+                    runtime_container_count=len(container_names),
+                    target_parallel_containers=target_parallel,
+                    last_reason="runtime container healthy",
+                )
+                runtime_log(
+                    "runtime_heartbeat",
+                    iteration=iteration,
+                    container_count=len(container_names),
+                    containers=container_names,
+                    states=states,
+                )
+                append_live(
+                    repo,
+                    {
+                        "event": "runtime_heartbeat",
+                        "iteration": iteration,
+                        "containers": container_names,
+                        "states": states,
+                        "container_count": len(container_names),
+                    },
+                )
+            except Exception as exc:
+                err = str(exc).strip() or exc.__class__.__name__
+                set_status(
+                    repo,
+                    phase="runtime_degraded",
+                    iteration=iteration,
+                    execution_mode=cfg["execution"]["mode"],
+                    target_parallel_containers=target_parallel,
+                    last_reason=err,
+                )
+                runtime_log("runtime_error", iteration=iteration, error=err)
+                append_live(repo, {"event": "runtime_error", "iteration": iteration, "error": err})
+            time.sleep(sleep_sec)
     finally:
-        stop_runtime_container(repo)
+        stop_runtime_containers(repo)
         if stop_file.exists():
             try:
                 stop_file.unlink()
             except OSError:
                 pass
-        set_status(repo, phase="stopped", last_reason="supervisor stopped")
+        set_status(
+            repo,
+            phase="stopped",
+            iteration=iteration,
+            last_reason="supervisor stopped",
+            runtime_containers=[],
+            runtime_container_count=0,
+        )
+        runtime_log("runner_stopped", iteration=iteration)
         append_live(repo, {"event": "runner_stopped"})
         release_lock(repo)
 
@@ -556,23 +824,144 @@ def cmd_stop(repo: Path) -> None:
             except OSError:
                 pass
 
-    stop_runtime_container(repo)
+    stop_runtime_containers(repo)
     release_lock(repo)
-    set_status(repo, phase="stopped", last_reason="stop requested")
+    set_status(
+        repo,
+        phase="stopped",
+        last_reason="stop requested",
+        runtime_containers=[],
+        runtime_container_count=0,
+    )
     print("stopped")
 
 
-def cmd_status(repo: Path) -> None:
-    init_repo(repo)
-    status = read_json(state_paths(repo)["status"], {})
-    print(json.dumps(status, indent=2, ensure_ascii=False))
+def cmd_status(repo: Path, as_json: bool = False) -> None:
+    paths = state_paths(repo)
+    if not paths["status"].exists():
+        init_repo(repo)
+        paths = state_paths(repo)
+    status = read_json(paths["status"], {})
+    cfg = load_config(repo)
+
+    execution_mode = str(status.get("execution_mode") or "docker")
+    configured_containers = runtime_container_names(repo, cfg)
+    status_containers = status.get("runtime_containers")
+    has_runtime_container_list = isinstance(status_containers, list)
+    runtime_containers: list[str] = []
+    if has_runtime_container_list:
+        runtime_containers = [str(name).strip() for name in status_containers if str(name).strip()]
+    if not has_runtime_container_list and not runtime_containers:
+        runtime_containers = [str(status.get("runtime_container") or configured_containers[0])]
+
+    runtime_states: Dict[str, str] = {}
+    claude_processes: list[Dict[str, str]] = []
+    if execution_mode == "docker":
+        if docker_available():
+            for name in runtime_containers:
+                runtime_states[name] = docker_container_state(name)
+            claude_processes = collect_claude_processes_for_containers(runtime_containers)
+        else:
+            for name in runtime_containers:
+                runtime_states[name] = "docker-unavailable"
+    else:
+        for name in runtime_containers:
+            runtime_states[name] = "n/a"
+
+    runner_pid = read_pidfile(paths["runner_pid"])
+    runner_alive = bool(runner_pid and pid_is_alive(runner_pid))
+
+    target_parallel = positive_int(
+        status.get("target_parallel_containers"),
+        default=target_parallel_containers(cfg),
+        minimum=1,
+        maximum=64,
+    )
+
+    payload = {
+        "phase": status.get("phase", "unknown"),
+        "iteration": status.get("iteration", 0),
+        "accepted_total": status.get("accepted_total", 0),
+        "rejected_total": status.get("rejected_total", 0),
+        "active_candidates": status.get("active_candidates", {}),
+        "execution_mode": execution_mode,
+        "last_reason": status.get("last_reason", ""),
+        "updated_at": status.get("updated_at", ""),
+        "runtime_container": runtime_containers[0] if runtime_containers else "",
+        "runtime_containers": runtime_containers,
+        "runtime_states": runtime_states,
+        "runtime_container_count": len(runtime_containers),
+        "target_parallel_containers": target_parallel,
+        "runner_pid": runner_pid,
+        "runner_alive": runner_alive,
+        "claude_processes": claude_processes,
+    }
+
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    active_candidates = payload["active_candidates"]
+    if isinstance(active_candidates, dict):
+        active_count = str(len(active_candidates))
+    elif isinstance(active_candidates, list):
+        active_count = str(len(active_candidates))
+    else:
+        active_count = str(active_candidates)
+
+    summary_rows = [
+        ["phase", str(payload["phase"])],
+        ["iteration", str(payload["iteration"])],
+        ["accepted_total", str(payload["accepted_total"])],
+        ["rejected_total", str(payload["rejected_total"])],
+        ["active_candidates", active_count],
+        ["target_parallel_containers", str(payload["target_parallel_containers"])],
+        ["runtime_container_count", str(payload["runtime_container_count"])],
+        ["execution_mode", str(payload["execution_mode"])],
+        ["runner_pid", str(payload["runner_pid"] or "-")],
+        ["runner_alive", "true" if payload["runner_alive"] else "false"],
+        ["last_reason", str(payload["last_reason"] or "-")],
+        ["updated_at", str(payload["updated_at"] or "-")],
+    ]
+    print(format_table(["field", "value"], summary_rows))
+
+    print("")
+    container_rows = [
+        [name, runtime_states.get(name, "unknown")]
+        for name in runtime_containers
+    ]
+    if not container_rows:
+        container_rows = [["-", "no runtime container"]]
+    print(format_table(["container", "state"], container_rows))
+
+    print("")
+    if claude_processes:
+        process_rows = [
+            [
+                row.get("container", "-"),
+                row["pid"],
+                row["ppid"],
+                row["etime"],
+                trim_text(row["command"], 96),
+            ]
+            for row in claude_processes
+        ]
+        print(format_table(["container", "claude_pid", "ppid", "elapsed", "command"], process_rows))
+    else:
+        print(
+            format_table(
+                ["container", "claude_pid", "ppid", "elapsed", "command"],
+                [["-", "-", "-", "-", "no active claude process"]],
+            )
+        )
 
 
 def cmd_doctor(repo: Path) -> None:
     init_repo(repo)
     cfg = load_config(repo)
     paths = state_paths(repo)
-    runtime_name = runtime_container_name(repo)
+    runtime_names = runtime_container_names(repo, cfg)
+    runtime_states = {name: docker_container_state(name) for name in runtime_names}
     info = {
         "repo": str(repo),
         "git_clean": True,
@@ -582,9 +971,11 @@ def cmd_doctor(repo: Path) -> None:
         "runtime_home_host": str(paths["runtime_home"]),
         "runtime_claude_dir": str(paths["runtime_claude_dir"]),
         "use_bare_mode": cfg["loop"].get("use_bare_mode"),
+        "target_parallel_containers": target_parallel_containers(cfg),
         "settings_container_path": cfg["execution"].get("settings_container_path"),
-        "runtime_container_name": runtime_name,
-        "runtime_container_state": docker_container_state(runtime_name),
+        "runtime_container_name": runtime_names[0] if runtime_names else "",
+        "runtime_container_names": runtime_names,
+        "runtime_container_states": runtime_states,
         "worker_image": cfg["execution"].get("image"),
         "worker_image_present": docker_image_exists(str(cfg["execution"].get("image"))),
         "benchmarks": cfg.get("benchmarks", []),
@@ -593,12 +984,30 @@ def cmd_doctor(repo: Path) -> None:
 
 
 def cmd_logs(repo: Path, mode: str) -> None:
-    log_path = state_paths(repo)["logs"] / "controller.out"
+    paths = state_paths(repo)
+    log_path = paths["logs"] / "controller.out"
+    live_path = paths["live"]
     if mode == "latest":
-        if not log_path.exists():
+        has_controller = log_path.exists()
+        has_live = live_path.exists()
+        if not has_controller and not has_live:
             print("No log file found")
             return
-        print(log_path.read_text(encoding="utf-8")[-10000:])
+        if has_controller:
+            print("== controller.out ==")
+            controller_text = log_path.read_text(encoding="utf-8", errors="replace")[-20000:]
+            print(console_safe_text(controller_text))
+        else:
+            print("== controller.out ==\nNo log file found")
+
+        print("")
+        if has_live:
+            print("== live.ndjson (last 60 events) ==")
+            lines = live_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in lines[-60:]:
+                print(console_safe_text(line))
+        else:
+            print("== live.ndjson ==\nNo live event file found")
         return
     if mode == "tail":
         if not log_path.exists():
@@ -642,7 +1051,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init")
     sub.add_parser("start")
     sub.add_parser("stop")
-    sub.add_parser("status")
+    status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true", help="print status as json")
     sub.add_parser("doctor")
     logs = sub.add_parser("logs")
     logs.add_argument("mode", nargs="?", default="latest", choices=["latest", "tail"])
@@ -662,7 +1072,7 @@ def main() -> int:
         elif args.cmd == "stop":
             cmd_stop(repo)
         elif args.cmd == "status":
-            cmd_status(repo)
+            cmd_status(repo, as_json=bool(getattr(args, "json", False)))
         elif args.cmd == "doctor":
             cmd_doctor(repo)
         elif args.cmd == "logs":
@@ -675,6 +1085,9 @@ def main() -> int:
     except OptLoopError as exc:
         print(f"optloop error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        print(f"optloop fatal: {exc}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
