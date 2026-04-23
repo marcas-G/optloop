@@ -22,9 +22,16 @@ sanitize_name() {
   printf '%s' "${raw:-optloop}"
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:?CLAUDE_PLUGIN_ROOT is not set}"
-PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:?CLAUDE_PLUGIN_DATA is not set}"
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+SAFE_PROJECT_NAME="$(sanitize_name "$PROJECT_NAME")"
+
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$DEFAULT_PLUGIN_ROOT}"
+PLUGIN_DATA_DEFAULT="${HOME:-$PROJECT_DIR/.optloop}/.claude/plugins/data/optloop/${SAFE_PROJECT_NAME}"
+PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:-$PLUGIN_DATA_DEFAULT}"
 
 need_cmd bash
 need_cmd docker
@@ -34,9 +41,6 @@ need_cmd find
 
 [ -d "$PROJECT_DIR" ] || fail "project dir does not exist: $PROJECT_DIR"
 [ -d "$PLUGIN_ROOT" ] || fail "plugin root does not exist: $PLUGIN_ROOT"
-
-PROJECT_NAME="$(basename "$PROJECT_DIR")"
-SAFE_PROJECT_NAME="$(sanitize_name "$PROJECT_NAME")"
 
 IMAGE_TAG_DEFAULT="optloop-${SAFE_PROJECT_NAME}:local"
 CONTAINER_NAME_DEFAULT="optloop-${SAFE_PROJECT_NAME}"
