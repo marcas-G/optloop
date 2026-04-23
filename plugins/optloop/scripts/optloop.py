@@ -62,6 +62,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "container_home": "/opt/optloop-home",
         "sync_template": True,
+        "copy_user_settings": True,
+        "overwrite_user_settings": True,
     },
     "execution": {
         "mode": "docker",
@@ -175,12 +177,40 @@ def sync_tree_missing_only(src: Path, dst: Path) -> None:
                 shutil.copy2(item, target)
 
 
-def ensure_runtime_pack(repo: Path) -> None:
+def copy_user_settings_into_runtime(repo: Path, overwrite: bool = False) -> None:
+    paths = state_paths(repo)
+
+    user_settings = Path.home() / ".claude" / "settings.json"
+    runtime_settings = paths["runtime_claude_dir"] / "settings.json"
+
+    if not user_settings.exists():
+        return
+
+    runtime_settings.parent.mkdir(parents=True, exist_ok=True)
+
+    if runtime_settings.exists() and not overwrite:
+        return
+
+    shutil.copy2(user_settings, runtime_settings)
+
+
+def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> None:
     paths = state_paths(repo)
     paths["runtime_root"].mkdir(parents=True, exist_ok=True)
     paths["runtime_home"].mkdir(parents=True, exist_ok=True)
     paths["runtime_claude_dir"].mkdir(parents=True, exist_ok=True)
+
     sync_tree_missing_only(RUNTIME_TEMPLATE_DIR, paths["runtime_claude_dir"])
+
+    if cfg is None:
+        cfg = load_config(repo)
+
+    runtime_cfg = cfg.get("runtime", {})
+    if runtime_cfg.get("copy_user_settings", True):
+        copy_user_settings_into_runtime(
+            repo,
+            overwrite=runtime_cfg.get("overwrite_user_settings", True),
+        )
 
 
 def init_repo(repo: Path) -> None:
@@ -190,8 +220,11 @@ def init_repo(repo: Path) -> None:
     paths["worktrees"].mkdir(parents=True, exist_ok=True)
     paths["benchmarks"].mkdir(parents=True, exist_ok=True)
     paths["logs"].mkdir(parents=True, exist_ok=True)
-    ensure_runtime_pack(repo)
-    save_config(repo, load_config(repo))
+
+    cfg = load_config(repo)
+    ensure_runtime_pack(repo, cfg)
+    save_config(repo, cfg)
+
     if not paths["status"].exists():
         write_json(paths["status"], {
             "phase": "idle",
@@ -199,21 +232,25 @@ def init_repo(repo: Path) -> None:
             "accepted_total": 0,
             "rejected_total": 0,
             "active_candidates": {},
-            "execution_mode": load_config(repo)["execution"]["mode"],
+            "execution_mode": cfg["execution"]["mode"],
         })
+
     if not paths["live"].exists():
         paths["live"].write_text("", encoding="utf-8")
+
     if not paths["notes"].exists():
         paths["notes"].write_text(
             "# optloop working state\n\nThis directory is managed by the optloop plugin.\n",
             encoding="utf-8",
         )
+
     info_exclude = repo / ".git" / "info" / "exclude"
     if info_exclude.exists():
         current = info_exclude.read_text(encoding="utf-8")
         if ".optloop/" not in current:
             suffix = "" if current.endswith("\n") or current == "" else "\n"
             info_exclude.write_text(current + suffix + ".optloop/\n", encoding="utf-8")
+
     print(f"initialized {paths['base']}")
 
 
@@ -285,13 +322,31 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
     if not docker_image_exists(image):
         raise OptLoopError(f"Docker image not found: {image}")
 
-    ensure_runtime_pack(repo)
+    ensure_runtime_pack(repo, cfg)
     paths = state_paths(repo)
     name = runtime_container_name(repo)
     state = docker_container_state(name)
+
     runtime_cfg = cfg.get("runtime", {})
-    runtime_container_home = str(runtime_cfg.get("container_home", "/opt/optloop-home")).strip()
-    workspace = str(cfg["execution"].get("container_workspace", "/workspace")).strip()
+    runtime_container_home = str(
+        runtime_cfg.get("container_home", "/opt/optloop-home")
+    ).strip()
+    runtime_home_host = paths["runtime_home"]
+
+    workspace = str(
+        cfg["execution"].get("container_workspace", "/workspace")
+    ).strip()
+
+    settings_host = str(
+        cfg["execution"].get("settings_host_path", "")
+    ).strip()
+
+    settings_container = str(
+        cfg["execution"].get(
+            "settings_container_path",
+            f"{runtime_container_home}/.claude/settings.json",
+        )
+    ).strip()
 
     if state == "running":
         return name
@@ -305,7 +360,7 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
         "-w", workspace,
         "-e", f"HOME={runtime_container_home}",
         "-v", f"{repo}:{workspace}",
-        "-v", f"{paths['runtime_home']}:{runtime_container_home}",
+        "-v", f"{runtime_home_host}:{runtime_container_home}",
     ]
 
     network_mode = str(cfg["execution"].get("network_mode", "bridge")).strip()
@@ -324,13 +379,15 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
     if pids_limit:
         cmd += ["--pids-limit", pids_limit]
 
+    user_value = str(cfg["execution"].get("user", "")).strip()
+    if user_value:
+        cmd += ["--user", user_value]
+
     for key in cfg["execution"].get("passthrough_env", []):
         val = os.environ.get(key)
         if val:
             cmd += ["-e", f"{key}={val}"]
 
-    settings_host = str(cfg["execution"].get("settings_host_path", "")).strip()
-    settings_container = str(cfg["execution"].get("settings_container_path", f"{runtime_container_home}/.claude/settings.json")).strip()
     if settings_host:
         shp = Path(settings_host).expanduser()
         if shp.exists():
@@ -391,6 +448,7 @@ def acquire_lock(repo: Path) -> None:
             pid_path.unlink()
         except FileNotFoundError:
             pass
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(str(current), encoding="utf-8")
 
 
@@ -407,7 +465,9 @@ def release_lock(repo: Path) -> None:
 
 def handle_signal_factory(repo: Path):
     def _handler(signum: int, frame: Any) -> None:
-        state_paths(repo)["stop"].touch()
+        stop_path = state_paths(repo)["stop"]
+        stop_path.parent.mkdir(parents=True, exist_ok=True)
+        stop_path.touch()
     return _handler
 
 
@@ -454,8 +514,11 @@ def cmd_start(repo: Path) -> None:
 
 def cmd_stop(repo: Path) -> None:
     paths = state_paths(repo)
+    paths["base"].mkdir(parents=True, exist_ok=True)
+
     pid = read_pidfile(paths["runner_pid"])
     paths["stop"].touch()
+
     if pid and pid_is_alive(pid):
         try:
             os.kill(pid, signal.SIGTERM)
@@ -469,6 +532,7 @@ def cmd_stop(repo: Path) -> None:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
+
     stop_runtime_container(repo)
     release_lock(repo)
     set_status(repo, phase="stopped", last_reason="stop requested")
@@ -531,9 +595,8 @@ def cmd_reset(repo: Path) -> None:
     cmd_stop(repo)
     for key in ["runner_pid", "stop", "status", "live"]:
         p = paths[key]
-        if p.exists():
-            if p.is_file():
-                p.unlink()
+        if p.exists() and p.is_file():
+            p.unlink()
     for key in ["history", "worktrees", "benchmarks", "logs", "runtime_root"]:
         p = paths[key]
         if p.exists():
