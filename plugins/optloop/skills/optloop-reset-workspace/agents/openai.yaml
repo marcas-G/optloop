@@ -1,4 +1,0 @@
-interface:
-  display_name: "OptLoop Reset Workspace"
-  short_description: "Reset OptLoop working state."
-  default_prompt: "Reset the OptLoop working state for this repository."

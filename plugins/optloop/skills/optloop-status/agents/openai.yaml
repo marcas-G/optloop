@@ -1,4 +1,0 @@
-interface:
-  display_name: "OptLoop Status"
-  short_description: "Show OptLoop supervisor status."
-  default_prompt: "Show the current OptLoop status."

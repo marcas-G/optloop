@@ -1,4 +1,0 @@
-interface:
-  display_name: "OptLoop Start Loop"
-  short_description: "Start the OptLoop background runner."
-  default_prompt: "Start the OptLoop background runner for this repository."

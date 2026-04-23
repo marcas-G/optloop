@@ -1,4 +1,0 @@
-interface:
-  display_name: "OptLoop Doctor"
-  short_description: "Run OptLoop runtime diagnostics."
-  default_prompt: "Run OptLoop diagnostics for this repository."

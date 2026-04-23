@@ -35,6 +35,7 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 fi
 
+printf '[optloop-launch] new background run started at %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > .optloop/logs/controller.out
 nohup env PYTHONUNBUFFERED=1 bash "$OPTLOOP_BIN" start \
   >> .optloop/logs/controller.out 2>&1 < /dev/null &
 PID=$!
