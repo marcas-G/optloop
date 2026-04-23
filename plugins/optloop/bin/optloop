@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$SELF_DIR/../scripts/optloop.py" "$@"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PYTHON_CMD=()
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_CMD=(python3)
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_CMD=(python)
+elif command -v py >/dev/null 2>&1; then
+  PYTHON_CMD=(py -3)
+else
+  echo "optloop error: no usable Python interpreter found. Tried: python3, python, py -3" >&2
+  exit 127
+fi
+
+exec "${PYTHON_CMD[@]}" "$SCRIPT_DIR/../scripts/optloop.py" "$@"
