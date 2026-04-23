@@ -6,7 +6,7 @@ This is a lean rebuild of `optloop-marketplace` focused on the **outer superviso
 
 - Detached/background supervisor launcher
 - Isolated non-bare Docker Claude runtime home mounted into the container
-- Command-surface style slash skills (`start-loop`, `stop-loop`, `status`, `doctor`, `logs`, `reset-workspace`)
+- Claude skill surface (`optloop-start-loop`, `optloop-stop-loop`, `optloop-status`, `optloop-doctor`, `optloop-logs`, `optloop-reset-workspace`)
 - Runtime template sync into `.optloop/runtime/home/.claude`
 - PID / STOP / status / live event handling
 - Docker runtime container lifecycle (start/stop/health)

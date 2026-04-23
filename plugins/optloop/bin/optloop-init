@@ -120,6 +120,7 @@ if ! docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
     -v "$PLUGIN_DATA:/opt/optloop-data" \
     -e OPTLOOP_PROJECT_DIR=/workspace \
     -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
+    -e PYTHONPATH=/workspace:/workspace/src \
     "$IMAGE_TAG" \
     tail -f /dev/null >/dev/null
   CONTAINER_STATUS="created"

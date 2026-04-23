@@ -24,3 +24,20 @@ A benchmark is acceptable only if:
 - it produces a primary metric with a clear direction,
 - it has a paired correctness gate,
 - it is documented in `.optloop-runtime/benchmark-manifest.json`.
+
+## Import path discipline
+
+Generated Python benchmark scripts must be runnable from the repository root without requiring package installation. Add a small path bootstrap near the top before project imports:
+
+```python
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+for candidate in (ROOT, ROOT / "src"):
+    value = str(candidate)
+    if value not in sys.path:
+        sys.path.insert(0, value)
+```
+
+Prefer this bootstrap for generated benchmark files under `benchmarks/` or `.optloop-runtime/benchmarks/` so `python benchmarks/name.py` works for both flat and `src/` Python layouts.

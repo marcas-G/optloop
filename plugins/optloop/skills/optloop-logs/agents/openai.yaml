@@ -1,0 +1,4 @@
+interface:
+  display_name: "OptLoop Logs"
+  short_description: "Show recent OptLoop logs."
+  default_prompt: "Show the latest OptLoop logs."

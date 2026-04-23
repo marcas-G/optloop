@@ -1,0 +1,4 @@
+interface:
+  display_name: "OptLoop Stop Loop"
+  short_description: "Stop the OptLoop supervisor."
+  default_prompt: "Stop the OptLoop supervisor for this repository."

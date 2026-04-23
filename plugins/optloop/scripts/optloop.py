@@ -359,6 +359,7 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any]) -> str:
         "--name", name,
         "-w", workspace,
         "-e", f"HOME={runtime_container_home}",
+        "-e", f"PYTHONPATH={workspace}:{workspace}/src",
         "-v", f"{repo}:{workspace}",
         "-v", f"{runtime_home_host}:{runtime_container_home}",
     ]

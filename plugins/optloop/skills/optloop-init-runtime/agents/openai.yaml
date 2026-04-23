@@ -1,0 +1,4 @@
+interface:
+  display_name: "OptLoop Init Runtime"
+  short_description: "Initialize the OptLoop Docker runtime."
+  default_prompt: "Initialize the OptLoop runtime for this repository."
