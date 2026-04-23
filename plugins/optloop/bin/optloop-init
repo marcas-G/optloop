@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+  echo "[optloop-init] ERROR: $*" >&2
+  exit 1
+}
+
+info() {
+  echo "[optloop-init] $*"
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+sanitize_name() {
+  local raw="$1"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  raw="$(printf '%s' "$raw" | sed 's/[^a-z0-9_.-]/-/g')"
+  raw="$(printf '%s' "$raw" | sed 's/--*/-/g; s/^-//; s/-$//')"
+  printf '%s' "${raw:-optloop}"
+}
+
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:?CLAUDE_PLUGIN_ROOT is not set}"
+PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:?CLAUDE_PLUGIN_DATA is not set}"
+
+need_cmd bash
+need_cmd docker
+need_cmd sed
+need_cmd tr
+need_cmd find
+
+[ -d "$PROJECT_DIR" ] || fail "project dir does not exist: $PROJECT_DIR"
+[ -d "$PLUGIN_ROOT" ] || fail "plugin root does not exist: $PLUGIN_ROOT"
+
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+SAFE_PROJECT_NAME="$(sanitize_name "$PROJECT_NAME")"
+
+IMAGE_TAG_DEFAULT="optloop-${SAFE_PROJECT_NAME}:local"
+CONTAINER_NAME_DEFAULT="optloop-${SAFE_PROJECT_NAME}"
+
+IMAGE_TAG="${OPTLOOP_IMAGE_TAG:-$IMAGE_TAG_DEFAULT}"
+CONTAINER_NAME="${OPTLOOP_CONTAINER_NAME:-$CONTAINER_NAME_DEFAULT}"
+
+RUNTIME_ROOT="${PLUGIN_DATA}/runtime"
+STATE_DIR="${RUNTIME_ROOT}/state"
+LOG_DIR="${RUNTIME_ROOT}/logs"
+WORK_DIR="${RUNTIME_ROOT}/work"
+CONFIG_DIR="${PLUGIN_DATA}/config"
+CACHE_DIR="${PLUGIN_DATA}/cache"
+BIN_DIR="${PLUGIN_ROOT}/bin"
+ENV_FILE="${CONFIG_DIR}/paths.env"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$WORK_DIR" "$CONFIG_DIR" "$CACHE_DIR"
+
+# 1) repair executable permissions for bundled scripts
+if [ -d "$BIN_DIR" ]; then
+  find "$BIN_DIR" -maxdepth 1 -type f -exec chmod +x {} +
+fi
+
+# 2) resolve Dockerfile
+DOCKERFILE_PATH=""
+for candidate in \
+  "$PROJECT_DIR/Dockerfile" \
+  "$PROJECT_DIR/docker/Dockerfile" \
+  "$PROJECT_DIR/.docker/Dockerfile"
+do
+  if [ -f "$candidate" ]; then
+    DOCKERFILE_PATH="$candidate"
+    break
+  fi
+done
+
+[ -n "$DOCKERFILE_PATH" ] || fail "no Dockerfile found under $PROJECT_DIR"
+
+# 3) write persistent path/env config
+cat > "$ENV_FILE" <<EOF
+PROJECT_DIR=$PROJECT_DIR
+PLUGIN_ROOT=$PLUGIN_ROOT
+PLUGIN_DATA=$PLUGIN_DATA
+RUNTIME_ROOT=$RUNTIME_ROOT
+STATE_DIR=$STATE_DIR
+LOG_DIR=$LOG_DIR
+WORK_DIR=$WORK_DIR
+CACHE_DIR=$CACHE_DIR
+DOCKERFILE_PATH=$DOCKERFILE_PATH
+IMAGE_TAG=$IMAGE_TAG
+CONTAINER_NAME=$CONTAINER_NAME
+EOF
+
+IMAGE_STATUS="reused"
+CONTAINER_STATUS="reused"
+
+# 4) build image if missing
+if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+  info "building image $IMAGE_TAG from $DOCKERFILE_PATH"
+  docker build \
+    -f "$DOCKERFILE_PATH" \
+    -t "$IMAGE_TAG" \
+    "$PROJECT_DIR"
+  IMAGE_STATUS="built"
+else
+  info "image already exists: $IMAGE_TAG"
+fi
+
+# 5) create container if missing
+if ! docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+  info "creating container $CONTAINER_NAME"
+  docker create \
+    --name "$CONTAINER_NAME" \
+    -w /workspace \
+    -v "$PROJECT_DIR:/workspace" \
+    -v "$PLUGIN_DATA:/opt/optloop-data" \
+    -e OPTLOOP_PROJECT_DIR=/workspace \
+    -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
+    "$IMAGE_TAG" \
+    tail -f /dev/null >/dev/null
+  CONTAINER_STATUS="created"
+fi
+
+# 6) start container if stopped
+RUNNING_STATE="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")"
+if [ "$RUNNING_STATE" != "true" ]; then
+  info "starting container $CONTAINER_NAME"
+  docker start "$CONTAINER_NAME" >/dev/null
+  if [ "$CONTAINER_STATUS" = "reused" ]; then
+    CONTAINER_STATUS="started"
+  elif [ "$CONTAINER_STATUS" = "created" ]; then
+    CONTAINER_STATUS="created+started"
+  fi
+else
+  info "container already running: $CONTAINER_NAME"
+fi
+
+# 7) compact status summary
+cat <<EOF
+[optloop-init] project_dir=$PROJECT_DIR
+[optloop-init] plugin_root=$PLUGIN_ROOT
+[optloop-init] plugin_data=$PLUGIN_DATA
+[optloop-init] dockerfile_path=$DOCKERFILE_PATH
+[optloop-init] image_tag=$IMAGE_TAG
+[optloop-init] container_name=$CONTAINER_NAME
+[optloop-init] image_status=$IMAGE_STATUS
+[optloop-init] container_status=$CONTAINER_STATUS
+[optloop-init] env_file=$ENV_FILE
+EOF
