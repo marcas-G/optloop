@@ -6,7 +6,7 @@ disable-model-invocation: true
 Run exactly:
 
 ```bash
-optloop reset
+bash "${CLAUDE_PLUGIN_ROOT}/bin/optloop" reset
 ```
 
 Only report the result.

@@ -69,7 +69,8 @@ DOCKERFILE_PATH=""
 for candidate in \
   "$PROJECT_DIR/Dockerfile" \
   "$PROJECT_DIR/docker/Dockerfile" \
-  "$PROJECT_DIR/.docker/Dockerfile"
+  "$PROJECT_DIR/.docker/Dockerfile" \
+  "$PLUGIN_ROOT/docker/Dockerfile.example"
 do
   if [ -f "$candidate" ]; then
     DOCKERFILE_PATH="$candidate"
@@ -77,7 +78,7 @@ do
   fi
 done
 
-[ -n "$DOCKERFILE_PATH" ] || fail "no Dockerfile found under $PROJECT_DIR"
+[ -n "$DOCKERFILE_PATH" ] || fail "no Dockerfile found under $PROJECT_DIR and no bundled Dockerfile.example found"
 
 # 3) write persistent path/env config
 cat > "$ENV_FILE" <<EOF

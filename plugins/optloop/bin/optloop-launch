@@ -8,7 +8,7 @@ OPTLOOP_BIN="$SELF_DIR/optloop"
 cd "$REPO_ROOT"
 mkdir -p .optloop/logs
 
-"$OPTLOOP_BIN" init >/dev/null 2>&1 || true
+bash "$OPTLOOP_BIN" init >/dev/null 2>&1 || true
 
 PID_FILE=".optloop/runner.pid"
 if [ -f "$PID_FILE" ]; then
@@ -20,7 +20,7 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 fi
 
-nohup env PYTHONUNBUFFERED=1 "$OPTLOOP_BIN" start \
+nohup env PYTHONUNBUFFERED=1 bash "$OPTLOOP_BIN" start \
   >> .optloop/logs/controller.out 2>&1 < /dev/null &
 PID=$!
 echo "optloop launched pid=$PID"

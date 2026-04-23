@@ -6,7 +6,7 @@ disable-model-invocation: true
 Run exactly:
 
 ```bash
-optloop status
+bash "${CLAUDE_PLUGIN_ROOT}/bin/optloop" status
 ```
 
 Return the command output only.

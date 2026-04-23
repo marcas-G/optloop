@@ -6,7 +6,7 @@ disable-model-invocation: true
 Run exactly:
 
 ```bash
-optloop stop
+bash "${CLAUDE_PLUGIN_ROOT}/bin/optloop" stop
 ```
 
 Only report the stop result.

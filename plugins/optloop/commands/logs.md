@@ -6,7 +6,7 @@ disable-model-invocation: true
 Run exactly:
 
 ```bash
-optloop logs latest
+bash "${CLAUDE_PLUGIN_ROOT}/bin/optloop" logs latest
 ```
 
 Return the command output only.

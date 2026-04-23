@@ -6,7 +6,7 @@ disable-model-invocation: true
 Run exactly:
 
 ```bash
-optloop-launch
+bash "${CLAUDE_PLUGIN_ROOT}/bin/optloop-launch"
 ```
 
 Only report whether launch succeeded.
