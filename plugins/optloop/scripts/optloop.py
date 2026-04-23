@@ -245,14 +245,21 @@ def detect_host_claude_settings_path() -> Optional[Path]:
         if candidate.exists() and candidate.is_file():
             return candidate.resolve()
 
-    home = Path.home()
-    candidates = [
-        home / ".claude" / "settings.json",
-        home / ".claude" / "setting.json",
-    ]
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
+    homes: list[Path] = [Path.home()]
+    env_home = os.environ.get("HOME", "").strip()
+    if env_home:
+        candidate_home = Path(env_home).expanduser()
+        if candidate_home not in homes:
+            homes.append(candidate_home)
+
+    for home in homes:
+        candidates = [
+            home / ".claude" / "settings.json",
+            home / ".claude" / "setting.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate.resolve()
     return None
 
 
@@ -304,45 +311,107 @@ def extract_anthropic_api_key_from_settings(settings_path: Optional[Path]) -> Op
     return walk(data)
 
 
-def detect_host_claude_auth_files() -> Dict[str, Path]:
+def detect_host_auth_artifacts() -> list[Path]:
     home = Path.home()
-    preferred = [
+    explicit = [
         home / ".claude" / ".credentials.json",
         home / ".claude" / "credentials.json",
         home / ".claude" / "auth.json",
         home / ".config" / "claude" / "auth.json",
+        home / ".config" / "claude" / "credentials.json",
         home / ".config" / "claude-code" / "auth.json",
-        home / ".config" / "claude-code" / ".credentials.json",
+        home / ".config" / "claude-code" / "credentials.json",
+        home / ".config" / "@anthropic-ai" / "claude-code" / "auth.json",
+        home / ".config" / "@anthropic-ai" / "claude-code" / "credentials.json",
     ]
-    files: Dict[str, Path] = {}
-    for path in preferred:
-        if path.exists() and path.is_file():
-            files.setdefault(path.name, path.resolve())
 
-    for base in [home / ".claude", home / ".config" / "claude", home / ".config" / "claude-code"]:
+    candidate_dirs = [
+        home / ".claude",
+        home / ".config" / "claude",
+        home / ".config" / "claude-code",
+        home / ".config" / "@anthropic-ai" / "claude-code",
+    ]
+    patterns = ["*auth*.json", "*credential*.json", "*token*.json"]
+
+    seen: set[str] = set()
+    found: list[Path] = []
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return
+        key = str(resolved)
+        if key in seen:
+            return
+        if not resolved.exists() or not resolved.is_file():
+            return
+        seen.add(key)
+        found.append(resolved)
+
+    for path in explicit:
+        add(path)
+
+    for base in candidate_dirs:
         if not base.exists() or not base.is_dir():
             continue
-        for pattern in ["*auth*.json", "*credential*.json"]:
-            for path in sorted(base.glob(pattern)):
-                if path.is_file():
-                    files.setdefault(path.name, path.resolve())
+        for pattern in patterns:
+            for path in sorted(base.rglob(pattern)):
+                add(path)
 
+    return sorted(found, key=lambda p: str(p))
+
+
+def detect_host_claude_auth_files() -> Dict[str, Path]:
+    home = Path.home()
+    files: Dict[str, Path] = {}
+    for path in detect_host_auth_artifacts():
+        key = path.name
+        try:
+            rel = path.relative_to(home)
+            key = str(rel)
+        except Exception:
+            key = path.name
+        files[key] = path
     return files
 
 
 def copy_user_auth_into_runtime(repo: Path, overwrite: bool = False) -> None:
     paths = state_paths(repo)
-    auth_files = detect_host_claude_auth_files()
+    auth_files = detect_host_auth_artifacts()
     if not auth_files:
         return
 
+    host_home = Path.home().resolve()
+    runtime_home = paths["runtime_home"]
     runtime_claude_dir = paths["runtime_claude_dir"]
     runtime_claude_dir.mkdir(parents=True, exist_ok=True)
-    for name, source in auth_files.items():
-        target = runtime_claude_dir / name
-        if target.exists() and not overwrite:
-            continue
-        shutil.copy2(source, target)
+    runtime_home.mkdir(parents=True, exist_ok=True)
+
+    for source in auth_files:
+        copied = False
+        try:
+            rel = source.relative_to(host_home)
+            target = runtime_home / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if overwrite or not target.exists():
+                shutil.copy2(source, target)
+            copied = True
+        except Exception:
+            copied = False
+
+        # Compatibility fallback: keep common auth filenames in $HOME/.claude/.
+        basename = source.name
+        if basename in {".credentials.json", "credentials.json", "auth.json"}:
+            fallback = runtime_claude_dir / basename
+            if overwrite or not fallback.exists():
+                shutil.copy2(source, fallback)
+            copied = True
+
+        if not copied:
+            fallback_generic = runtime_claude_dir / basename
+            if overwrite or not fallback_generic.exists():
+                shutil.copy2(source, fallback_generic)
 
 
 def ensure_runtime_pack(repo: Path, cfg: Optional[Dict[str, Any]] = None) -> None:
@@ -1485,6 +1554,9 @@ def cmd_doctor(repo: Path) -> None:
     effective_settings = resolve_settings_host_path(cfg)
     settings_key_present = bool(extract_anthropic_api_key_from_settings(effective_settings))
     host_auth_files = sorted(detect_host_claude_auth_files().keys())
+    runtime_auth_files = sorted([str(p.relative_to(paths["runtime_home"])) for p in paths["runtime_home"].rglob("*auth*.json")] +
+                                [str(p.relative_to(paths["runtime_home"])) for p in paths["runtime_home"].rglob("*credential*.json")])
+    runtime_auth_files = sorted(set(runtime_auth_files))
     if docker_visible:
         worker_states = {name: probe_claude_worker(repo, name) for name in runtime_names}
     else:
@@ -1521,6 +1593,7 @@ def cmd_doctor(repo: Path) -> None:
         "settings_host_path_effective": str(effective_settings) if effective_settings else "",
         "settings_contains_anthropic_key": settings_key_present,
         "host_auth_files_detected": host_auth_files,
+        "runtime_auth_files_detected": runtime_auth_files,
         "container_workers": worker_states,
         "worker_image": cfg["execution"].get("image"),
         "worker_image_present": docker_image_exists(str(cfg["execution"].get("image"))),
