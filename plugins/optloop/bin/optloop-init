@@ -122,8 +122,19 @@ CACHE_DIR="${PLUGIN_DATA}/cache"
 LOCK_DIR="${RUNTIME_ROOT}/locks"
 BIN_DIR="${PLUGIN_ROOT}/bin"
 ENV_FILE="${CONFIG_DIR}/paths.env"
+RUNTIME_HOME_HOST="${PROJECT_DIR}/.optloop/runtime/home"
+RUNTIME_HOME_CONTAINER="/opt/optloop-home"
 
-mkdir -p "$STATE_DIR" "$LOG_DIR" "$WORK_DIR" "$CONFIG_DIR" "$CACHE_DIR" "$LOCK_DIR"
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$WORK_DIR" "$CONFIG_DIR" "$CACHE_DIR" "$LOCK_DIR" "$RUNTIME_HOME_HOST/.claude"
+
+SETTINGS_HOST_PATH=""
+if [ -n "${CLAUDE_SETTINGS_PATH:-}" ] && [ -f "${CLAUDE_SETTINGS_PATH}" ]; then
+  SETTINGS_HOST_PATH="${CLAUDE_SETTINGS_PATH}"
+elif [ -f "${HOME:-}/.claude/settings.json" ]; then
+  SETTINGS_HOST_PATH="${HOME}/.claude/settings.json"
+elif [ -f "${HOME:-}/.claude/setting.json" ]; then
+  SETTINGS_HOST_PATH="${HOME}/.claude/setting.json"
+fi
 
 INIT_LOCK="${LOCK_DIR}/init.lock"
 acquire_init_lock "$INIT_LOCK"
@@ -161,6 +172,9 @@ STATE_DIR=$STATE_DIR
 LOG_DIR=$LOG_DIR
 WORK_DIR=$WORK_DIR
 CACHE_DIR=$CACHE_DIR
+RUNTIME_HOME_HOST=$RUNTIME_HOME_HOST
+RUNTIME_HOME_CONTAINER=$RUNTIME_HOME_CONTAINER
+SETTINGS_HOST_PATH=$SETTINGS_HOST_PATH
 DOCKERFILE_PATH=$DOCKERFILE_PATH
 DOCKERFILE_SHA=$DOCKERFILE_SHA
 IMAGE_TAG=$IMAGE_TAG
@@ -218,20 +232,26 @@ attempt=1
 max_attempts=4
 while [ "$attempt" -le "$max_attempts" ]; do
   info "creating+starting container $CONTAINER_NAME (attempt $attempt/$max_attempts)"
-  RUN_OUTPUT="$(docker run -d \
-    --name "$CONTAINER_NAME" \
-    -w /workspace \
-    --label "optloop.project_dir=$PROJECT_DIR" \
-    --label "optloop.plugin_root=$PLUGIN_ROOT" \
-    --label "optloop.plugin_data=$PLUGIN_DATA" \
-    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
-    -v "$PROJECT_DIR:/workspace" \
-    -v "$PLUGIN_DATA:/opt/optloop-data" \
-    -e OPTLOOP_PROJECT_DIR=/workspace \
-    -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data \
-    -e PYTHONPATH=/workspace:/workspace/src \
-    "$IMAGE_TAG" \
-    tail -f /dev/null 2>&1)" && RUN_RC=0 || RUN_RC=$?
+  DOCKER_CMD=(docker run -d
+    --name "$CONTAINER_NAME"
+    -w /workspace
+    --label "optloop.project_dir=$PROJECT_DIR"
+    --label "optloop.plugin_root=$PLUGIN_ROOT"
+    --label "optloop.plugin_data=$PLUGIN_DATA"
+    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA"
+    -v "$PROJECT_DIR:/workspace"
+    -v "$PLUGIN_DATA:/opt/optloop-data"
+    -v "$RUNTIME_HOME_HOST:$RUNTIME_HOME_CONTAINER"
+    -e OPTLOOP_PROJECT_DIR=/workspace
+    -e OPTLOOP_PLUGIN_DATA=/opt/optloop-data
+    -e HOME="$RUNTIME_HOME_CONTAINER"
+    -e PYTHONPATH=/workspace:/workspace/src
+  )
+  if [ -n "$SETTINGS_HOST_PATH" ]; then
+    DOCKER_CMD+=(-v "$SETTINGS_HOST_PATH:$RUNTIME_HOME_CONTAINER/.claude/settings.json:ro")
+  fi
+  DOCKER_CMD+=("$IMAGE_TAG")
+  RUN_OUTPUT="$("${DOCKER_CMD[@]}" 2>&1)" && RUN_RC=0 || RUN_RC=$?
   if [ "$RUN_RC" -eq 0 ]; then
     if [ "$CONTAINER_STATUS" = "created" ]; then
       CONTAINER_STATUS="created+started"

@@ -263,14 +263,44 @@ def detect_host_claude_settings_path() -> Optional[Path]:
     return None
 
 
+def configured_settings_path_candidates(raw_path: str) -> list[Path]:
+    raw = str(raw_path).strip()
+    if not raw:
+        return []
+
+    variants: list[str] = [raw]
+    slash_fixed = raw.replace("\\", "/")
+    if slash_fixed not in variants:
+        variants.append(slash_fixed)
+
+    if slash_fixed.startswith("home/"):
+        prefixed = f"/{slash_fixed}"
+        if prefixed not in variants:
+            variants.append(prefixed)
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for item in variants:
+        try:
+            p = Path(item).expanduser()
+        except Exception:
+            continue
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(p)
+    return candidates
+
+
 def resolve_settings_host_path(cfg: Optional[Dict[str, Any]] = None) -> Optional[Path]:
     if cfg is not None:
         execution = cfg.get("execution", {})
         configured = str(execution.get("settings_host_path", "")).strip()
         if configured:
-            candidate = Path(configured).expanduser()
-            if candidate.exists() and candidate.is_file():
-                return candidate.resolve()
+            for candidate in configured_settings_path_candidates(configured):
+                if candidate.exists() and candidate.is_file():
+                    return candidate.resolve()
     return detect_host_claude_settings_path()
 
 
@@ -452,10 +482,9 @@ def init_repo(repo: Path) -> None:
     execution_cfg = cfg.setdefault("execution", {})
     if execution_cfg.get("image") in {None, "", "optloop-worker:latest"}:
         execution_cfg["image"] = default_project_image(repo)
-    if not str(execution_cfg.get("settings_host_path", "")).strip():
-        host_settings = detect_host_claude_settings_path()
-        if host_settings is not None:
-            execution_cfg["settings_host_path"] = str(host_settings)
+    host_settings = resolve_settings_host_path(cfg)
+    if host_settings is not None:
+        execution_cfg["settings_host_path"] = str(host_settings)
     ensure_runtime_pack(repo, cfg)
     save_config(repo, cfg)
 
@@ -1068,9 +1097,7 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
         cfg["execution"].get("container_workspace", "/workspace")
     ).strip()
 
-    settings_host = str(
-        cfg["execution"].get("settings_host_path", "")
-    ).strip()
+    settings_host = resolve_settings_host_path(cfg)
 
     settings_container = str(
         cfg["execution"].get(
@@ -1118,10 +1145,8 @@ def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
     for key, val in passthrough_env_values(cfg).items():
         cmd += ["-e", f"{key}={val}"]
 
-    if settings_host:
-        shp = Path(settings_host).expanduser()
-        if shp.exists():
-            cmd += ["-v", f"{shp}:{settings_container}:ro"]
+    if settings_host is not None:
+        cmd += ["-v", f"{settings_host}:{settings_container}:ro"]
 
     extra_run_args = cfg["execution"].get("extra_run_args", [])
     if isinstance(extra_run_args, list):

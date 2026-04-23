@@ -27,4 +27,4 @@ USER node
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["bash"]
+CMD ["bash", "-lc", "set -eu; mkdir -p /opt/optloop-home/.claude /tmp/optloop-home/.claude /home/node/.claude /workspace/.optloop/runtime/home/.claude; exec tail -f /dev/null"]
