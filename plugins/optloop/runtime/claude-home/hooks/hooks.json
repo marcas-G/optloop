@@ -1,0 +1,26 @@
+{
+  "description": "OptLoop runtime continuity hooks",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/skills/optloop-core/scripts/session_start.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/skills/optloop-core/scripts/session_stop.py",
+            "suppressOutput": true
+          }
+        ]
+      }
+    ]
+  }
+}

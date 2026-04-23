@@ -1,0 +1,19 @@
+{
+  "attempt_id": "attempt-0007",
+  "parent_revision": "main@{accepted-2}",
+  "hypothesis": "Avoid repeated JSON decoding on the measured request path.",
+  "changed_files": [
+    "service/handler.py",
+    "tests/benchmarks/test_request_path.py"
+  ],
+  "commands_run": [
+    "pytest tests/test_api_contract.py",
+    "pytest tests/benchmarks/test_request_path.py --benchmark-json .optloop-runtime/results/attempt-0007.json"
+  ],
+  "result": "rejected",
+  "rejection_category": "no-meaningful-improvement",
+  "primary_metric_summary": {
+    "baseline_mean": 31.4,
+    "candidate_mean": 30.9
+  }
+}

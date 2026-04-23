@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "status": "active",
+  "phase": "selecting-candidate",
+  "current_attempt": null,
+  "attempt_counter": 7,
+  "accepted_count": 2,
+  "rejected_count": 4,
+  "aborted_count": 1,
+  "last_accepted_attempt": "attempt-0005",
+  "last_rejected_attempt": "attempt-0006",
+  "stop_requested": false,
+  "benchmark_manifest": ".optloop-runtime/benchmark-manifest.json",
+  "primary_metric": "latency_ms",
+  "metric_direction": "lower",
+  "baseline_summary": {
+    "mean": 31.4,
+    "count": 8
+  },
+  "notes": []
+}

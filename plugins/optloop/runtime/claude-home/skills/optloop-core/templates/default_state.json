@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "status": "idle",
+  "phase": "uninitialized",
+  "current_attempt": null,
+  "attempt_counter": 0,
+  "accepted_count": 0,
+  "rejected_count": 0,
+  "aborted_count": 0,
+  "last_accepted_attempt": null,
+  "last_rejected_attempt": null,
+  "stop_requested": false,
+  "benchmark_manifest": ".optloop-runtime/benchmark-manifest.json",
+  "primary_metric": null,
+  "metric_direction": null,
+  "baseline_summary": null,
+  "notes": []
+}

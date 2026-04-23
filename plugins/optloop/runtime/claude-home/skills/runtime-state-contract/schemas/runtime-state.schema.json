@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OptLoopRuntimeState",
+  "type": "object",
+  "required": [
+    "version",
+    "status",
+    "phase",
+    "current_attempt",
+    "attempt_counter",
+    "accepted_count",
+    "rejected_count",
+    "aborted_count",
+    "stop_requested",
+    "benchmark_manifest",
+    "primary_metric",
+    "metric_direction",
+    "baseline_summary",
+    "notes"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "current_attempt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attempt_counter": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "accepted_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rejected_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "aborted_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_accepted_attempt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_rejected_attempt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stop_requested": {
+      "type": "boolean"
+    },
+    "benchmark_manifest": {
+      "type": "string"
+    },
+    "primary_metric": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "metric_direction": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "lower",
+        "higher",
+        null
+      ]
+    },
+    "baseline_summary": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
