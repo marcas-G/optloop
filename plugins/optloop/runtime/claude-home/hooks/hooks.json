@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/skills/optloop-core/scripts/session_start.py"
+            "command": "python3 \"$HOME/.claude/skills/optloop-core/scripts/session_start.py\""
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/skills/optloop-core/scripts/session_stop.py",
+            "command": "python3 \"$HOME/.claude/skills/optloop-core/scripts/session_stop.py\"",
             "suppressOutput": true
           }
         ]

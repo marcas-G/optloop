@@ -70,6 +70,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "mode": "docker",
         "runtime": "docker",
         "image": "optloop-worker:latest",
+        "auto_start_claude": True,
+        "claude_command": "claude",
+        "claude_skip_permissions": True,
+        "claude_restart_delay_sec": 15,
+        "claude_prompt": "",
         "network_mode": "bridge",
         "container_workspace": "/workspace",
         "container_home": "/tmp/optloop-home",
@@ -100,6 +105,15 @@ class OptLoopError(RuntimeError):
     pass
 
 
+DEFAULT_CLAUDE_AUTORUN_PROMPT = (
+    "Run one autonomous repository optimization work session in /workspace.\n"
+    "Use durable state under .optloop-runtime as the source of truth.\n"
+    "Follow the instructions in $HOME/.claude/CLAUDE.md.\n"
+    "Do not ask for human input.\n"
+    "Complete one coherent step, persist evidence and state, then exit."
+)
+
+
 def state_paths(repo: Path) -> Dict[str, Path]:
     base = repo / ".optloop"
     runtime_root = base / "runtime"
@@ -121,6 +135,34 @@ def state_paths(repo: Path) -> Dict[str, Path]:
         "runtime_home": runtime_home,
         "runtime_claude_dir": runtime_claude_dir,
     }
+
+
+def worker_runtime_dir(repo: Path) -> Path:
+    return state_paths(repo)["runtime_root"] / "workers"
+
+
+def worker_pid_host_path(repo: Path, container_name: str) -> Path:
+    return worker_runtime_dir(repo) / f"{container_name}.pid"
+
+
+def worker_prompt_host_path(repo: Path) -> Path:
+    return state_paths(repo)["runtime_root"] / "claude_prompt.txt"
+
+
+def worker_log_host_path(repo: Path, container_name: str) -> Path:
+    return state_paths(repo)["logs"] / f"claude-worker-{container_name}.log"
+
+
+def worker_pid_container_path(container_name: str) -> str:
+    return f"/workspace/.optloop/runtime/workers/{container_name}.pid"
+
+
+def worker_prompt_container_path() -> str:
+    return "/workspace/.optloop/runtime/claude_prompt.txt"
+
+
+def worker_log_container_path(container_name: str) -> str:
+    return f"/workspace/.optloop/logs/claude-worker-{container_name}.log"
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -221,6 +263,7 @@ def init_repo(repo: Path) -> None:
     paths["worktrees"].mkdir(parents=True, exist_ok=True)
     paths["benchmarks"].mkdir(parents=True, exist_ok=True)
     paths["logs"].mkdir(parents=True, exist_ok=True)
+    worker_runtime_dir(repo).mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(repo)
     execution_cfg = cfg.setdefault("execution", {})
@@ -240,6 +283,7 @@ def init_repo(repo: Path) -> None:
             "target_parallel_containers": target_parallel_containers(cfg),
             "runtime_containers": [],
             "runtime_container_count": 0,
+            "container_workers": {},
         })
 
     if not paths["live"].exists():
@@ -273,6 +317,7 @@ def set_status(repo: Path, **updates: Any) -> Dict[str, Any]:
         "target_parallel_containers": 1,
         "runtime_containers": [],
         "runtime_container_count": 0,
+        "container_workers": {},
     })
     status.update(updates)
     status["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -349,6 +394,35 @@ def positive_int(value: Any, default: int, minimum: int = 1, maximum: int = 64) 
 def target_parallel_containers(cfg: Dict[str, Any]) -> int:
     loop_cfg = cfg.get("loop", {})
     return positive_int(loop_cfg.get("parallel_candidates", 1), default=1, minimum=1, maximum=64)
+
+
+def auto_start_claude(cfg: Dict[str, Any]) -> bool:
+    execution = cfg.get("execution", {})
+    return bool(execution.get("auto_start_claude", True))
+
+
+def claude_command(cfg: Dict[str, Any]) -> str:
+    execution = cfg.get("execution", {})
+    value = str(execution.get("claude_command", "claude")).strip()
+    return value or "claude"
+
+
+def claude_skip_permissions(cfg: Dict[str, Any]) -> bool:
+    execution = cfg.get("execution", {})
+    return bool(execution.get("claude_skip_permissions", True))
+
+
+def claude_restart_delay_sec(cfg: Dict[str, Any]) -> int:
+    execution = cfg.get("execution", {})
+    return positive_int(execution.get("claude_restart_delay_sec", 15), default=15, minimum=1, maximum=3600)
+
+
+def claude_prompt_text(cfg: Dict[str, Any]) -> str:
+    execution = cfg.get("execution", {})
+    override = str(execution.get("claude_prompt", "")).strip()
+    if override:
+        return override
+    return DEFAULT_CLAUDE_AUTORUN_PROMPT
 
 
 def runtime_container_names(repo: Path, cfg: Dict[str, Any]) -> list[str]:
@@ -517,6 +591,179 @@ def list_runtime_containers(repo: Path) -> list[str]:
     return names
 
 
+def ensure_worker_prompt_file(repo: Path, cfg: Dict[str, Any]) -> Path:
+    prompt_path = worker_prompt_host_path(repo)
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_text = claude_prompt_text(cfg).strip() + "\n"
+    current = ""
+    if prompt_path.exists():
+        current = prompt_path.read_text(encoding="utf-8", errors="replace")
+    if current != prompt_text:
+        prompt_path.write_text(prompt_text, encoding="utf-8")
+    return prompt_path
+
+
+def probe_claude_worker(repo: Path, container_name: str) -> Dict[str, Any]:
+    pid_path = worker_pid_container_path(container_name)
+    check_script = (
+        "set -eu\n"
+        "PIDFILE=\"$OPTLOOP_WORKER_PIDFILE\"\n"
+        "if [ -s \"$PIDFILE\" ]; then\n"
+        "  PID=\"$(cat \"$PIDFILE\" 2>/dev/null || true)\"\n"
+        "  if [ -n \"$PID\" ] && kill -0 \"$PID\" 2>/dev/null; then\n"
+        "    echo \"alive:$PID\"\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  if [ -n \"$PID\" ]; then\n"
+        "    echo \"stale:$PID\"\n"
+        "    exit 0\n"
+        "  fi\n"
+        "fi\n"
+        "echo \"missing\"\n"
+    )
+    proc = run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"OPTLOOP_WORKER_PIDFILE={pid_path}",
+            container_name,
+            "sh",
+            "-lc",
+            check_script,
+        ],
+        check=False,
+    )
+    line = (proc.stdout or "").strip()
+    state = "missing"
+    pid = ""
+    if line.startswith("alive:"):
+        state = "alive"
+        pid = line.split(":", 1)[1].strip()
+    elif line.startswith("stale:"):
+        state = "stale"
+        pid = line.split(":", 1)[1].strip()
+    elif line:
+        state = line
+
+    last_line = ""
+    log_host = worker_log_host_path(repo, container_name)
+    if log_host.exists():
+        lines = log_host.read_text(encoding="utf-8", errors="replace").splitlines()
+        if lines:
+            last_line = trim_text(lines[-1], 140)
+
+    return {
+        "container": container_name,
+        "supervisor_state": state,
+        "supervisor_pid": pid,
+        "log_file": str(log_host),
+        "last_log": last_line,
+    }
+
+
+def ensure_claude_worker(repo: Path, cfg: Dict[str, Any], container_name: str) -> Dict[str, Any]:
+    ensure_worker_prompt_file(repo, cfg)
+    command = claude_command(cfg)
+    restart_delay = claude_restart_delay_sec(cfg)
+    skip_permissions = "1" if claude_skip_permissions(cfg) else "0"
+
+    pid_host = worker_pid_host_path(repo, container_name)
+    pid_host.parent.mkdir(parents=True, exist_ok=True)
+    log_host = worker_log_host_path(repo, container_name)
+    log_host.parent.mkdir(parents=True, exist_ok=True)
+
+    start_script = (
+        "set -eu\n"
+        "mkdir -p \"$(dirname \"$OPTLOOP_WORKER_PIDFILE\")\" \"$(dirname \"$OPTLOOP_WORKER_LOGFILE\")\"\n"
+        "if [ -s \"$OPTLOOP_WORKER_PIDFILE\" ]; then\n"
+        "  OLD_PID=\"$(cat \"$OPTLOOP_WORKER_PIDFILE\" 2>/dev/null || true)\"\n"
+        "  if [ -n \"$OLD_PID\" ] && kill -0 \"$OLD_PID\" 2>/dev/null; then\n"
+        "    echo \"already:$OLD_PID\"\n"
+        "    exit 0\n"
+        "  fi\n"
+        "fi\n"
+        "(\n"
+        "  set +e\n"
+        "  export CLAUDE_PROJECT_DIR=/workspace\n"
+        "  HAS_PROMPT=0\n"
+        "  HAS_SKIP=0\n"
+        "  if command -v \"$OPTLOOP_CLAUDE_COMMAND\" >/dev/null 2>&1; then\n"
+        "    if \"$OPTLOOP_CLAUDE_COMMAND\" --help 2>/dev/null | grep -q -- ' -p'; then HAS_PROMPT=1; fi\n"
+        "    if \"$OPTLOOP_CLAUDE_COMMAND\" --help 2>/dev/null | grep -q -- '--dangerously-skip-permissions'; then HAS_SKIP=1; fi\n"
+        "  fi\n"
+        "  while true; do\n"
+        "    TS=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
+        "    if ! command -v \"$OPTLOOP_CLAUDE_COMMAND\" >/dev/null 2>&1; then\n"
+        "      echo \"[$TS] missing_claude_command container=$OPTLOOP_WORKER_CONTAINER cmd=$OPTLOOP_CLAUDE_COMMAND\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      sleep 30\n"
+        "      continue\n"
+        "    fi\n"
+        "    if [ \"$HAS_PROMPT\" -ne 1 ]; then\n"
+        "      echo \"[$TS] claude_prompt_mode_unsupported container=$OPTLOOP_WORKER_CONTAINER\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "      sleep 30\n"
+        "      continue\n"
+        "    fi\n"
+        "    PROMPT_TEXT=\"$(cat \"$OPTLOOP_PROMPT_FILE\" 2>/dev/null || true)\"\n"
+        "    if [ -z \"$PROMPT_TEXT\" ]; then PROMPT_TEXT='Continue repository optimization in /workspace using durable state under .optloop-runtime.'; fi\n"
+        "    echo \"[$TS] cycle_start container=$OPTLOOP_WORKER_CONTAINER\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "    if [ \"$OPTLOOP_CLAUDE_SKIP_PERMISSIONS\" = \"1\" ] && [ \"$HAS_SKIP\" -eq 1 ]; then\n"
+        "      \"$OPTLOOP_CLAUDE_COMMAND\" --dangerously-skip-permissions -p \"$PROMPT_TEXT\" >>\"$OPTLOOP_WORKER_LOGFILE\" 2>&1\n"
+        "      RC=\"$?\"\n"
+        "    else\n"
+        "      \"$OPTLOOP_CLAUDE_COMMAND\" -p \"$PROMPT_TEXT\" >>\"$OPTLOOP_WORKER_LOGFILE\" 2>&1\n"
+        "      RC=\"$?\"\n"
+        "    fi\n"
+        "    TS_END=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n"
+        "    echo \"[$TS_END] cycle_end container=$OPTLOOP_WORKER_CONTAINER exit_code=$RC\" >>\"$OPTLOOP_WORKER_LOGFILE\"\n"
+        "    sleep \"$OPTLOOP_CLAUDE_RESTART_DELAY_SEC\"\n"
+        "  done\n"
+        ") >/dev/null 2>&1 &\n"
+        "NEW_PID=\"$!\"\n"
+        "echo \"$NEW_PID\" > \"$OPTLOOP_WORKER_PIDFILE\"\n"
+        "echo \"started:$NEW_PID\"\n"
+    )
+
+    run(
+        [
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "-e",
+            f"OPTLOOP_WORKER_CONTAINER={container_name}",
+            "-e",
+            f"OPTLOOP_WORKER_PIDFILE={worker_pid_container_path(container_name)}",
+            "-e",
+            f"OPTLOOP_WORKER_LOGFILE={worker_log_container_path(container_name)}",
+            "-e",
+            f"OPTLOOP_PROMPT_FILE={worker_prompt_container_path()}",
+            "-e",
+            f"OPTLOOP_CLAUDE_COMMAND={command}",
+            "-e",
+            f"OPTLOOP_CLAUDE_RESTART_DELAY_SEC={restart_delay}",
+            "-e",
+            f"OPTLOOP_CLAUDE_SKIP_PERMISSIONS={skip_permissions}",
+            "-e",
+            "CLAUDE_PROJECT_DIR=/workspace",
+            container_name,
+            "sh",
+            "-lc",
+            start_script,
+        ],
+        check=False,
+    )
+    return probe_claude_worker(repo, container_name)
+
+
+def ensure_claude_workers(repo: Path, cfg: Dict[str, Any], container_names: list[str]) -> Dict[str, Dict[str, Any]]:
+    if not auto_start_claude(cfg):
+        return {}
+    workers: Dict[str, Dict[str, Any]] = {}
+    for name in container_names:
+        workers[name] = ensure_claude_worker(repo, cfg, name)
+    return workers
+
 def ensure_runtime_container(repo: Path, cfg: Dict[str, Any], name: str) -> str:
     if cfg["execution"].get("mode") != "docker":
         return "local"
@@ -619,6 +866,10 @@ def ensure_runtime_containers(repo: Path, cfg: Dict[str, Any]) -> list[str]:
     extras = [name for name in existing if name not in desired]
     for name in extras:
         run(["docker", "rm", "-f", name], check=False)
+        try:
+            worker_pid_host_path(repo, name).unlink()
+        except FileNotFoundError:
+            pass
 
     return desired
 
@@ -629,6 +880,10 @@ def stop_runtime_containers(repo: Path) -> None:
     names = list_runtime_containers(repo)
     for name in names:
         run(["docker", "rm", "-f", name], check=False)
+        try:
+            worker_pid_host_path(repo, name).unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_pidfile(path: Path) -> Optional[int]:
@@ -733,9 +988,14 @@ def loop(repo: Path) -> None:
             try:
                 container_names = ensure_runtime_containers(repo, cfg)
                 states = {name: docker_container_state(name) for name in container_names}
+                worker_statuses = ensure_claude_workers(repo, cfg, container_names)
+                worker_state_map = {name: worker_statuses.get(name, {}).get("supervisor_state", "unknown") for name in container_names}
+                workers_healthy = (not auto_start_claude(cfg)) or all(state == "alive" for state in worker_state_map.values())
+                phase = "runtime_active" if workers_healthy else "runtime_degraded"
+                reason = "runtime container healthy" if workers_healthy else "claude worker not alive"
                 set_status(
                     repo,
-                    phase="runtime_active",
+                    phase=phase,
                     iteration=iteration,
                     execution_mode=cfg["execution"]["mode"],
                     runtime_container=container_names[0] if container_names else "",
@@ -743,7 +1003,8 @@ def loop(repo: Path) -> None:
                     runtime_states=states,
                     runtime_container_count=len(container_names),
                     target_parallel_containers=target_parallel,
-                    last_reason="runtime container healthy",
+                    container_workers=worker_statuses,
+                    last_reason=reason,
                 )
                 runtime_log(
                     "runtime_heartbeat",
@@ -751,6 +1012,8 @@ def loop(repo: Path) -> None:
                     container_count=len(container_names),
                     containers=container_names,
                     states=states,
+                    worker_states=worker_state_map,
+                    phase=phase,
                 )
                 append_live(
                     repo,
@@ -759,6 +1022,8 @@ def loop(repo: Path) -> None:
                         "iteration": iteration,
                         "containers": container_names,
                         "states": states,
+                        "worker_states": worker_state_map,
+                        "phase": phase,
                         "container_count": len(container_names),
                     },
                 )
@@ -789,6 +1054,7 @@ def loop(repo: Path) -> None:
             last_reason="supervisor stopped",
             runtime_containers=[],
             runtime_container_count=0,
+            container_workers={},
         )
         runtime_log("runner_stopped", iteration=iteration)
         append_live(repo, {"event": "runner_stopped"})
@@ -832,6 +1098,7 @@ def cmd_stop(repo: Path) -> None:
         last_reason="stop requested",
         runtime_containers=[],
         runtime_container_count=0,
+        container_workers={},
     )
     print("stopped")
 
@@ -856,17 +1123,39 @@ def cmd_status(repo: Path, as_json: bool = False) -> None:
 
     runtime_states: Dict[str, str] = {}
     claude_processes: list[Dict[str, str]] = []
+    worker_statuses: Dict[str, Dict[str, Any]] = {}
+    stored_workers = status.get("container_workers", {})
     if execution_mode == "docker":
         if docker_available():
             for name in runtime_containers:
                 runtime_states[name] = docker_container_state(name)
+                worker_statuses[name] = probe_claude_worker(repo, name)
             claude_processes = collect_claude_processes_for_containers(runtime_containers)
         else:
             for name in runtime_containers:
                 runtime_states[name] = "docker-unavailable"
+                if isinstance(stored_workers, dict):
+                    existing = stored_workers.get(name, {})
+                    if isinstance(existing, dict) and existing.get("supervisor_state"):
+                        worker_statuses[name] = existing
+                if name not in worker_statuses:
+                    worker_statuses[name] = {
+                        "container": name,
+                        "supervisor_state": "docker-unavailable",
+                        "supervisor_pid": "",
+                        "log_file": str(worker_log_host_path(repo, name)),
+                        "last_log": "",
+                    }
     else:
         for name in runtime_containers:
             runtime_states[name] = "n/a"
+            worker_statuses[name] = {
+                "container": name,
+                "supervisor_state": "n/a",
+                "supervisor_pid": "",
+                "log_file": str(worker_log_host_path(repo, name)),
+                "last_log": "",
+            }
 
     runner_pid = read_pidfile(paths["runner_pid"])
     runner_alive = bool(runner_pid and pid_is_alive(runner_pid))
@@ -892,6 +1181,8 @@ def cmd_status(repo: Path, as_json: bool = False) -> None:
         "runtime_states": runtime_states,
         "runtime_container_count": len(runtime_containers),
         "target_parallel_containers": target_parallel,
+        "auto_start_claude": auto_start_claude(cfg),
+        "container_workers": worker_statuses,
         "runner_pid": runner_pid,
         "runner_alive": runner_alive,
         "claude_processes": claude_processes,
@@ -917,6 +1208,7 @@ def cmd_status(repo: Path, as_json: bool = False) -> None:
         ["active_candidates", active_count],
         ["target_parallel_containers", str(payload["target_parallel_containers"])],
         ["runtime_container_count", str(payload["runtime_container_count"])],
+        ["auto_start_claude", "true" if payload["auto_start_claude"] else "false"],
         ["execution_mode", str(payload["execution_mode"])],
         ["runner_pid", str(payload["runner_pid"] or "-")],
         ["runner_alive", "true" if payload["runner_alive"] else "false"],
@@ -933,6 +1225,22 @@ def cmd_status(repo: Path, as_json: bool = False) -> None:
     if not container_rows:
         container_rows = [["-", "no runtime container"]]
     print(format_table(["container", "state"], container_rows))
+
+    print("")
+    worker_rows = []
+    for name in runtime_containers:
+        worker = worker_statuses.get(name, {})
+        worker_rows.append(
+            [
+                name,
+                str(worker.get("supervisor_state", "unknown")),
+                str(worker.get("supervisor_pid", "") or "-"),
+                trim_text(str(worker.get("last_log", "") or "-"), 100),
+            ]
+        )
+    if not worker_rows:
+        worker_rows = [["-", "-", "-", "no worker supervisor"]]
+    print(format_table(["container", "worker_state", "worker_pid", "last_log"], worker_rows))
 
     print("")
     if claude_processes:
@@ -961,12 +1269,26 @@ def cmd_doctor(repo: Path) -> None:
     cfg = load_config(repo)
     paths = state_paths(repo)
     runtime_names = runtime_container_names(repo, cfg)
+    docker_visible = docker_available()
     runtime_states = {name: docker_container_state(name) for name in runtime_names}
+    if docker_visible:
+        worker_states = {name: probe_claude_worker(repo, name) for name in runtime_names}
+    else:
+        worker_states = {
+            name: {
+                "container": name,
+                "supervisor_state": "docker-unavailable",
+                "supervisor_pid": "",
+                "log_file": str(worker_log_host_path(repo, name)),
+                "last_log": "",
+            }
+            for name in runtime_names
+        }
     info = {
         "repo": str(repo),
         "git_clean": True,
         "execution_mode": cfg["execution"].get("mode"),
-        "docker_visible": docker_available(),
+        "docker_visible": docker_visible,
         "runtime_pack_present": paths["runtime_claude_dir"].exists(),
         "runtime_home_host": str(paths["runtime_home"]),
         "runtime_claude_dir": str(paths["runtime_claude_dir"]),
@@ -976,6 +1298,11 @@ def cmd_doctor(repo: Path) -> None:
         "runtime_container_name": runtime_names[0] if runtime_names else "",
         "runtime_container_names": runtime_names,
         "runtime_container_states": runtime_states,
+        "auto_start_claude": auto_start_claude(cfg),
+        "claude_command": claude_command(cfg),
+        "claude_skip_permissions": claude_skip_permissions(cfg),
+        "claude_restart_delay_sec": claude_restart_delay_sec(cfg),
+        "container_workers": worker_states,
         "worker_image": cfg["execution"].get("image"),
         "worker_image_present": docker_image_exists(str(cfg["execution"].get("image"))),
         "benchmarks": cfg.get("benchmarks", []),
@@ -987,10 +1314,11 @@ def cmd_logs(repo: Path, mode: str) -> None:
     paths = state_paths(repo)
     log_path = paths["logs"] / "controller.out"
     live_path = paths["live"]
+    worker_logs = sorted(paths["logs"].glob("claude-worker-*.log"))
     if mode == "latest":
         has_controller = log_path.exists()
         has_live = live_path.exists()
-        if not has_controller and not has_live:
+        if not has_controller and not has_live and not worker_logs:
             print("No log file found")
             return
         if has_controller:
@@ -1008,6 +1336,17 @@ def cmd_logs(repo: Path, mode: str) -> None:
                 print(console_safe_text(line))
         else:
             print("== live.ndjson ==\nNo live event file found")
+
+        print("")
+        if worker_logs:
+            for worker_log in worker_logs:
+                print(f"== {worker_log.name} (last 40 lines) ==")
+                lines = worker_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in lines[-40:]:
+                    print(console_safe_text(line))
+                print("")
+        else:
+            print("== claude worker logs ==\nNo claude worker log found")
         return
     if mode == "tail":
         if not log_path.exists():
