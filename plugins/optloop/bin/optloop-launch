@@ -3,25 +3,32 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPTLOOP_BIN="$SELF_DIR/optloop"
+OPTLOOP_INIT="$SELF_DIR/optloop-init"
 
 cd "$REPO_ROOT"
 mkdir -p .optloop/logs
 
-bash "$OPTLOOP_BIN" init >/dev/null 2>&1 || true
-
-PID_FILE=".optloop/runner.pid"
-if [ -f "$PID_FILE" ]; then
-  PID="$(tr -d '[:space:]' < "$PID_FILE" || true)"
-  if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null; then
-    echo "optloop already running pid=$PID"
-    exit 0
-  fi
-  rm -f "$PID_FILE"
+if [ ! -x "$OPTLOOP_INIT" ]; then
+  chmod +x "$OPTLOOP_INIT" 2>/dev/null || true
 fi
 
-nohup env PYTHONUNBUFFERED=1 bash "$OPTLOOP_BIN" start \
-  >> .optloop/logs/controller.out 2>&1 < /dev/null &
-PID=$!
-echo "optloop launched pid=$PID"
-exit 0
+INIT_OUTPUT="$(bash "$OPTLOOP_INIT")"
+printf '%s\n' "$INIT_OUTPUT"
+
+ENV_FILE="$(printf '%s\n' "$INIT_OUTPUT" | sed -n 's/^\[optloop-init\] env_file=//p' | tail -n 1)"
+if [ -z "$ENV_FILE" ] || [ ! -f "$ENV_FILE" ]; then
+  echo "optloop error: cannot locate optloop runtime env file" >&2
+  exit 1
+fi
+
+CONTAINER_NAME="$(sed -n 's/^CONTAINER_NAME=//p' "$ENV_FILE" | tail -n 1)"
+if [ -z "$CONTAINER_NAME" ]; then
+  echo "optloop error: CONTAINER_NAME missing from $ENV_FILE" >&2
+  exit 1
+fi
+
+CLAUDE_COMMAND="${OPTLOOP_CLAUDE_COMMAND:-claude}"
+echo "[optloop-launch] opening foreground Claude Code in container: $CONTAINER_NAME"
+echo "[optloop-launch] command: docker exec -it $CONTAINER_NAME bash -lc 'cd /workspace && exec $CLAUDE_COMMAND'"
+
+exec docker exec -it "$CONTAINER_NAME" bash -lc "cd /workspace && exec $CLAUDE_COMMAND"
