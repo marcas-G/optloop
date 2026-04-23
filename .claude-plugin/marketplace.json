@@ -1,0 +1,13 @@
+{
+  "name": "optloop-private",
+  "owner": {
+    "name": "marcas-G"
+  },
+  "plugins": [
+    {
+      "name": "optloop",
+      "source": "./plugins/optloop",
+      "description": "Autonomous optimization runtime plugin"
+    }
+  ]
+}

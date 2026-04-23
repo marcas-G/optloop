@@ -1,0 +1,29 @@
+FROM node:20-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    python3 \
+    python3-pip \
+    procps \
+    tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Compatibility alias for projects that invoke `python`.
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Install Claude Code CLI globally.
+RUN npm install -g @anthropic-ai/claude-code
+
+RUN mkdir -p /home/node/.claude /tmp/optloop-home /workspace && \
+    chown -R node:node /home/node /tmp/optloop-home /workspace
+
+USER node
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bash"]

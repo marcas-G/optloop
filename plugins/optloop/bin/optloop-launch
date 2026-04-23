@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OPTLOOP_BIN="$SELF_DIR/optloop"
+
+cd "$REPO_ROOT"
+mkdir -p .optloop/logs
+
+"$OPTLOOP_BIN" init >/dev/null 2>&1 || true
+
+PID_FILE=".optloop/runner.pid"
+if [ -f "$PID_FILE" ]; then
+  PID="$(tr -d '[:space:]' < "$PID_FILE" || true)"
+  if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null; then
+    echo "optloop already running pid=$PID"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
+fi
+
+nohup env PYTHONUNBUFFERED=1 "$OPTLOOP_BIN" start \
+  >> .optloop/logs/controller.out 2>&1 < /dev/null &
+PID=$!
+echo "optloop launched pid=$PID"
+exit 0
