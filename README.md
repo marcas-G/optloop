@@ -1,6 +1,6 @@
 # optloop-marketplace
 
-Current plugin version: `0.1.35`
+Current plugin version: `0.1.36`
 
 OptLoop is an outer supervisor plugin. It runs in the host repository, manages a Docker container pool, and keeps in-container Claude workers running in iterative optimization cycles.
 
@@ -41,6 +41,25 @@ Worker image:
 - `claude` CLI available in container
 - runtime dependencies installed
 - reference image: `plugins/optloop/docker/Dockerfile.example`
+
+## Build Overrides (Restricted Network)
+
+If Docker Hub access is unstable, `optloop-init` supports build overrides via environment variables:
+
+- `OPTLOOP_DOCKERFILE_PATH`: force a specific Dockerfile path
+- `OPTLOOP_BASE_IMAGE`: override `Dockerfile.example` base image
+- `OPTLOOP_NPM_REGISTRY`: override npm registry when installing Claude CLI
+- `OPTLOOP_BUILD_RETRIES`: docker build retry count (default `3`)
+- `OPTLOOP_BUILD_NO_CACHE=1`: build with `--no-cache`
+- `OPTLOOP_ALLOW_STALE_IMAGE_ON_BUILD_FAIL=1`: keep old image if rebuild fails
+
+Example:
+
+```bash
+OPTLOOP_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/node:20-bookworm-slim \
+OPTLOOP_NPM_REGISTRY=https://registry.npmmirror.com \
+bash plugins/optloop/bin/optloop-init
+```
 
 ## Authentication and Settings
 

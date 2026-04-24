@@ -106,12 +106,17 @@ need_cmd docker
 need_cmd sed
 need_cmd tr
 need_cmd find
+need_cmd grep
+need_cmd tee
 
 IMAGE_TAG_DEFAULT="optloop-${SAFE_PROJECT_NAME}:local"
 CONTAINER_NAME_DEFAULT="optloop-${SAFE_PROJECT_NAME}"
 
 IMAGE_TAG="${OPTLOOP_IMAGE_TAG:-$IMAGE_TAG_DEFAULT}"
 CONTAINER_NAME="${OPTLOOP_CONTAINER_NAME:-$CONTAINER_NAME_DEFAULT}"
+DOCKERFILE_OVERRIDE="${OPTLOOP_DOCKERFILE_PATH:-}"
+OPTLOOP_BASE_IMAGE_VALUE="${OPTLOOP_BASE_IMAGE:-node:20-bookworm-slim}"
+OPTLOOP_NPM_REGISTRY_VALUE="${OPTLOOP_NPM_REGISTRY:-}"
 
 RUNTIME_ROOT="${PLUGIN_DATA}/runtime"
 STATE_DIR="${RUNTIME_ROOT}/state"
@@ -154,17 +159,25 @@ fi
 
 # 2) resolve Dockerfile
 DOCKERFILE_PATH=""
-for candidate in \
-  "$PROJECT_DIR/Dockerfile" \
-  "$PROJECT_DIR/docker/Dockerfile" \
-  "$PROJECT_DIR/.docker/Dockerfile" \
-  "$PLUGIN_ROOT/docker/Dockerfile.example"
-do
-  if [ -f "$candidate" ]; then
-    DOCKERFILE_PATH="$candidate"
-    break
+if [ -n "$DOCKERFILE_OVERRIDE" ]; then
+  if [ -f "$DOCKERFILE_OVERRIDE" ]; then
+    DOCKERFILE_PATH="$DOCKERFILE_OVERRIDE"
+  else
+    fail "OPTLOOP_DOCKERFILE_PATH does not exist: $DOCKERFILE_OVERRIDE"
   fi
-done
+else
+  for candidate in \
+    "$PROJECT_DIR/Dockerfile" \
+    "$PROJECT_DIR/docker/Dockerfile" \
+    "$PROJECT_DIR/.docker/Dockerfile" \
+    "$PLUGIN_ROOT/docker/Dockerfile.example"
+  do
+    if [ -f "$candidate" ]; then
+      DOCKERFILE_PATH="$candidate"
+      break
+    fi
+  done
+fi
 
 [ -n "$DOCKERFILE_PATH" ] || fail "no Dockerfile found under $PROJECT_DIR and no bundled Dockerfile.example found"
 DOCKERFILE_SHA="$(file_fingerprint "$DOCKERFILE_PATH")"
@@ -185,6 +198,8 @@ SETTINGS_HOST_PATH=$SETTINGS_HOST_PATH
 HOST_CLAUDE_DIR=$HOST_CLAUDE_DIR
 DOCKERFILE_PATH=$DOCKERFILE_PATH
 DOCKERFILE_SHA=$DOCKERFILE_SHA
+OPTLOOP_BASE_IMAGE=$OPTLOOP_BASE_IMAGE_VALUE
+OPTLOOP_NPM_REGISTRY=$OPTLOOP_NPM_REGISTRY_VALUE
 IMAGE_TAG=$IMAGE_TAG
 CONTAINER_NAME=$CONTAINER_NAME
 EOF
@@ -192,38 +207,103 @@ EOF
 IMAGE_STATUS="reused"
 CONTAINER_STATUS="created"
 
+build_image_with_retry() {
+  local action="$1"
+  local max_attempts="${OPTLOOP_BUILD_RETRIES:-3}"
+  local attempt=1
+  local build_cmd=()
+  local build_log="$LOG_DIR/docker-build.log"
+
+  case "$max_attempts" in
+    ''|*[!0-9]*)
+      max_attempts=3
+      ;;
+  esac
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    info "$action image $IMAGE_TAG from $DOCKERFILE_PATH (attempt $attempt/$max_attempts)"
+    : > "$build_log"
+    build_cmd=(
+      docker build
+      -f "$DOCKERFILE_PATH"
+      --label "optloop.project_dir=$PROJECT_DIR"
+      --label "optloop.plugin_root=$PLUGIN_ROOT"
+      --label "optloop.dockerfile_path=$DOCKERFILE_PATH"
+      --label "optloop.dockerfile_sha=$DOCKERFILE_SHA"
+      --label "optloop.base_image=$OPTLOOP_BASE_IMAGE_VALUE"
+      --label "optloop.npm_registry=$OPTLOOP_NPM_REGISTRY_VALUE"
+      --build-arg "OPTLOOP_BASE_IMAGE=$OPTLOOP_BASE_IMAGE_VALUE"
+      --build-arg "OPTLOOP_NPM_REGISTRY=$OPTLOOP_NPM_REGISTRY_VALUE"
+    )
+    if [ "${OPTLOOP_BUILD_NO_CACHE:-0}" = "1" ]; then
+      build_cmd+=(--no-cache)
+    fi
+    build_cmd+=(-t "$IMAGE_TAG" "$PROJECT_DIR")
+
+    if "${build_cmd[@]}" 2>&1 | tee "$build_log"; then
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      info "docker build failed; retrying in 2s"
+      sleep 2
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+is_registry_timeout_error() {
+  local build_log="$1"
+  grep -qiE 'DeadlineExceeded|failed to fetch anonymous token|i/o timeout|TLS handshake timeout|context deadline exceeded|network is unreachable|dial tcp' "$build_log"
+}
+
 # 4) build image if missing or stale
 IMAGE_EXISTS="false"
 IMAGE_DOCKERFILE_SHA=""
+IMAGE_BASE_IMAGE=""
+IMAGE_NPM_REGISTRY=""
+IMAGE_BUILD_LOG="$LOG_DIR/docker-build.log"
 if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   IMAGE_EXISTS="true"
   IMAGE_DOCKERFILE_SHA="$(docker image inspect -f '{{ index .Config.Labels "optloop.dockerfile_sha" }}' "$IMAGE_TAG" 2>/dev/null || true)"
+  IMAGE_BASE_IMAGE="$(docker image inspect -f '{{ index .Config.Labels "optloop.base_image" }}' "$IMAGE_TAG" 2>/dev/null || true)"
+  IMAGE_NPM_REGISTRY="$(docker image inspect -f '{{ index .Config.Labels "optloop.npm_registry" }}' "$IMAGE_TAG" 2>/dev/null || true)"
 fi
 
 if [ "$IMAGE_EXISTS" != "true" ]; then
-  info "building image $IMAGE_TAG from $DOCKERFILE_PATH"
-  docker build \
-    -f "$DOCKERFILE_PATH" \
-    --label "optloop.project_dir=$PROJECT_DIR" \
-    --label "optloop.plugin_root=$PLUGIN_ROOT" \
-    --label "optloop.dockerfile_path=$DOCKERFILE_PATH" \
-    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
-    -t "$IMAGE_TAG" \
-    "$PROJECT_DIR"
+  build_image_with_retry "building" || {
+    if is_registry_timeout_error "$IMAGE_BUILD_LOG"; then
+      fail "docker build cannot reach registry. Set OPTLOOP_BASE_IMAGE to a reachable mirror, or set OPTLOOP_DOCKERFILE_PATH to your project Dockerfile. build_log=$IMAGE_BUILD_LOG"
+    fi
+    fail "docker build failed for image $IMAGE_TAG (build_log=$IMAGE_BUILD_LOG)"
+  }
   IMAGE_STATUS="built"
-elif [ "${OPTLOOP_REBUILD_IMAGE:-0}" = "1" ] || [ "$IMAGE_DOCKERFILE_SHA" != "$DOCKERFILE_SHA" ]; then
-  info "rebuilding image $IMAGE_TAG from $DOCKERFILE_PATH"
-  docker build \
-    -f "$DOCKERFILE_PATH" \
-    --label "optloop.project_dir=$PROJECT_DIR" \
-    --label "optloop.plugin_root=$PLUGIN_ROOT" \
-    --label "optloop.dockerfile_path=$DOCKERFILE_PATH" \
-    --label "optloop.dockerfile_sha=$DOCKERFILE_SHA" \
-    -t "$IMAGE_TAG" \
-    "$PROJECT_DIR"
-  IMAGE_STATUS="rebuilt"
+elif [ "${OPTLOOP_REBUILD_IMAGE:-0}" = "1" ] || [ "$IMAGE_DOCKERFILE_SHA" != "$DOCKERFILE_SHA" ] || [ "$IMAGE_BASE_IMAGE" != "$OPTLOOP_BASE_IMAGE_VALUE" ] || [ "$IMAGE_NPM_REGISTRY" != "$OPTLOOP_NPM_REGISTRY_VALUE" ]; then
+  build_image_with_retry "rebuilding" || {
+    if [ "${OPTLOOP_ALLOW_STALE_IMAGE_ON_BUILD_FAIL:-1}" = "1" ]; then
+      info "rebuild failed; reusing existing image $IMAGE_TAG because OPTLOOP_ALLOW_STALE_IMAGE_ON_BUILD_FAIL=1"
+      IMAGE_STATUS="reused-stale"
+    else
+      if is_registry_timeout_error "$IMAGE_BUILD_LOG"; then
+        fail "docker rebuild cannot reach registry. Set OPTLOOP_BASE_IMAGE to a reachable mirror, or set OPTLOOP_DOCKERFILE_PATH to your project Dockerfile. build_log=$IMAGE_BUILD_LOG"
+      fi
+      fail "docker rebuild failed for image $IMAGE_TAG (build_log=$IMAGE_BUILD_LOG)"
+    fi
+  }
+  if [ "$IMAGE_STATUS" != "reused-stale" ]; then
+    IMAGE_STATUS="rebuilt"
+  fi
 else
   info "image already exists: $IMAGE_TAG"
+fi
+
+if [ "$IMAGE_STATUS" = "reused-stale" ]; then
+  info "image status: reused stale image (build failed)"
 fi
 
 # 5) always create a fresh container for the current plugin/project state
