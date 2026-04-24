@@ -19,50 +19,12 @@ from typing import Any, Dict, Optional
 RUNTIME_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "runtime" / "claude-home"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "benchmarks": [
-        {
-            "name": "primary",
-            "command": None,
-            "direction": "lower",
-            "sample_runs": 9,
-            "warmup_runs": 1,
-            "timeout_sec": 1800,
-            "min_improvement_pct": 1.0,
-            "noise_floor_pct": 0.35,
-            "bootstrap_resamples": 1200,
-            "weight": 1.0,
-            "min_runtime_sec": 0.15,
-            "max_cv_pct": 10.0,
-        }
-    ],
-    "acceptance": {
-        "require_primary_acceptance": True,
-        "secondary_max_regression_pct": 0.35,
-    },
-    "validation": {
-        "commands": [],
-        "equivalence_commands": [],
-        "require_clean_git": True,
-        "forbid_paths": [".git/**", ".optloop/**"],
-        "allow_generated_benchmark_under": ".optloop/benchmarks",
-        "compare_stdout_exact": True,
-        "compare_stderr_exact": True,
-    },
     "loop": {
         "parallel_candidates": 2,
-        "max_candidate_turns": 20,
-        "max_bootstrap_turns": 20,
-        "claude_model": "sonnet",
-        "claude_effort": "medium",
         "sleep_between_iterations_sec": 5,
-        "keep_rejected_worktrees": False,
-        "use_bare_mode": False,
-        "candidate_timeout_sec": 1800,
     },
     "runtime": {
-        "enabled": True,
         "container_home": "/opt/optloop-home",
-        "sync_template": True,
         "copy_user_settings": True,
         "overwrite_user_settings": True,
         "copy_user_auth": True,
@@ -70,7 +32,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "execution": {
         "mode": "docker",
-        "runtime": "docker",
         "image": "optloop-worker:latest",
         "auto_start_claude": True,
         "claude_command": "claude",
@@ -80,12 +41,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "claude_prompt": "",
         "network_mode": "bridge",
         "container_workspace": "/workspace",
-        "container_home": "/tmp/optloop-home",
         "cpus": "2",
         "memory": "4g",
         "pids_limit": 512,
         "user": "",
-        "mount_host_claude_dir": False,
         "settings_host_path": "",
         "settings_container_path": "/opt/optloop-home/.claude/settings.json",
         "passthrough_env": [
@@ -101,16 +60,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "AZURE_OPENAI_API_KEY",
         ],
         "extra_run_args": [],
-    },
-    "scaffold": {
-        "benchmark_owner": ".optloop/benchmarks",
-        "notes_file": ".optloop/README.md",
-    },
-    "workspace": {
-        "auto_initial_commit": True,
-        "auto_initial_commit_message": "[optloop] baseline snapshot",
-        "allow_untracked_only_autocommit": True,
-        "refuse_tracked_dirty_repo": True,
     },
 }
 
@@ -637,6 +586,57 @@ def parse_non_negative_int(value: Any, default: int = 0) -> int:
     if parsed < 0:
         return default
     return parsed
+
+
+def parse_optional_non_negative_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    if parsed < 0:
+        return None
+    return parsed
+
+
+def count_json_files(path: Path) -> int:
+    if not path.exists() or not path.is_dir():
+        return 0
+    try:
+        return sum(1 for _ in path.rglob("*.json"))
+    except Exception:
+        return 0
+
+
+def runtime_progress_snapshot(repo: Path) -> Dict[str, Any]:
+    runtime_root = repo / ".optloop-runtime"
+    state_path = runtime_root / "state.json"
+
+    accepted_total: Optional[int] = None
+    rejected_total: Optional[int] = None
+    active_candidates: Dict[str, Any] = {}
+
+    state = read_json(state_path, {})
+    if isinstance(state, dict):
+        accepted_total = parse_optional_non_negative_int(state.get("accepted_count"))
+        rejected_total = parse_optional_non_negative_int(state.get("rejected_count"))
+
+        current_attempt = state.get("current_attempt")
+        if isinstance(current_attempt, str) and current_attempt.strip():
+            active_candidates[current_attempt.strip()] = {
+                "source": "runtime-state",
+                "phase": str(state.get("phase", "")).strip() or "unknown",
+            }
+
+    if accepted_total is None:
+        accepted_total = count_json_files(runtime_root / "accepted")
+    if rejected_total is None:
+        rejected_total = count_json_files(runtime_root / "rejected")
+
+    return {
+        "accepted_total": accepted_total,
+        "rejected_total": rejected_total,
+        "active_candidates": active_candidates,
+    }
 
 
 def runtime_log(event: str, **fields: Any) -> None:
@@ -1517,6 +1517,7 @@ def loop(repo: Path) -> None:
     cfg = load_config(repo)
     target_parallel = target_parallel_containers(cfg)
     sleep_sec = positive_int(cfg["loop"].get("sleep_between_iterations_sec", 5), default=5, minimum=1, maximum=3600)
+    initial_progress = runtime_progress_snapshot(repo)
     acquire_lock(repo)
     signal.signal(signal.SIGTERM, handle_signal_factory(repo))
     signal.signal(signal.SIGINT, handle_signal_factory(repo))
@@ -1527,6 +1528,9 @@ def loop(repo: Path) -> None:
         phase="starting",
         execution_mode=cfg["execution"]["mode"],
         iteration=iteration,
+        accepted_total=initial_progress["accepted_total"],
+        rejected_total=initial_progress["rejected_total"],
+        active_candidates=initial_progress["active_candidates"],
         target_parallel_containers=target_parallel,
     )
     runtime_log(
@@ -1562,10 +1566,14 @@ def loop(repo: Path) -> None:
                 workers_healthy = (not auto_start_claude(cfg)) or all(state == "alive" for state in worker_state_map.values())
                 phase = "runtime_active" if workers_healthy else "runtime_degraded"
                 reason = "runtime container healthy" if workers_healthy else "claude worker not alive"
+                progress = runtime_progress_snapshot(repo)
                 set_status(
                     repo,
                     phase=phase,
                     iteration=iteration,
+                    accepted_total=progress["accepted_total"],
+                    rejected_total=progress["rejected_total"],
+                    active_candidates=progress["active_candidates"],
                     execution_mode=cfg["execution"]["mode"],
                     runtime_container=container_names[0] if container_names else "",
                     runtime_containers=container_names,
@@ -1589,6 +1597,9 @@ def loop(repo: Path) -> None:
                     {
                         "event": "runtime_heartbeat",
                         "iteration": iteration,
+                        "accepted_total": progress["accepted_total"],
+                        "rejected_total": progress["rejected_total"],
+                        "active_candidates": progress["active_candidates"],
                         "containers": container_names,
                         "states": states,
                         "worker_states": worker_state_map,
@@ -1608,16 +1619,30 @@ def loop(repo: Path) -> None:
             except Exception as exc:
                 err = str(exc).strip() or exc.__class__.__name__
                 reason = err
+                progress = runtime_progress_snapshot(repo)
                 set_status(
                     repo,
                     phase="runtime_degraded",
                     iteration=iteration,
+                    accepted_total=progress["accepted_total"],
+                    rejected_total=progress["rejected_total"],
+                    active_candidates=progress["active_candidates"],
                     execution_mode=cfg["execution"]["mode"],
                     target_parallel_containers=target_parallel,
                     last_reason=err,
                 )
                 runtime_log("runtime_error", iteration=iteration, error=err)
-                append_live(repo, {"event": "runtime_error", "iteration": iteration, "error": err})
+                append_live(
+                    repo,
+                    {
+                        "event": "runtime_error",
+                        "iteration": iteration,
+                        "error": err,
+                        "accepted_total": progress["accepted_total"],
+                        "rejected_total": progress["rejected_total"],
+                        "active_candidates": progress["active_candidates"],
+                    },
+                )
                 capture_iteration_history(
                     repo,
                     iteration=iteration,
@@ -1890,7 +1915,6 @@ def cmd_doctor(repo: Path) -> None:
         "runtime_pack_present": paths["runtime_claude_dir"].exists(),
         "runtime_home_host": str(paths["runtime_home"]),
         "runtime_claude_dir": str(paths["runtime_claude_dir"]),
-        "use_bare_mode": cfg["loop"].get("use_bare_mode"),
         "target_parallel_containers": target_parallel_containers(cfg),
         "settings_container_path": cfg["execution"].get("settings_container_path"),
         "runtime_container_name": runtime_names[0] if runtime_names else "",

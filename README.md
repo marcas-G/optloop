@@ -1,70 +1,68 @@
 # optloop-marketplace
 
-Current plugin version: `0.1.33`
+Current plugin version: `0.1.35`
 
-This repository contains the OptLoop marketplace plugin. The current implementation is an outer supervisor that runs in the host project and orchestrates Docker runtime containers plus in-container Claude workers.
+OptLoop is an outer supervisor plugin. It runs in the host repository, manages a Docker container pool, and keeps in-container Claude workers running in iterative optimization cycles.
 
-## What It Does Now
+## What It Does
 
-- Starts a detached background supervisor (`optloop start` / `/optloop:start-loop`).
-- Ensures a Docker container pool for the current repository.
-- Uses `loop.parallel_candidates` as target container count.
-- Optionally auto-starts one Claude worker loop per container (`execution.auto_start_claude=true` by default).
-- Collects supervisor state, container state, worker state, and process view.
-- Exposes status/doctor/logs/reset commands through both CLI and plugin skills.
+- Starts a detached background supervisor (`optloop start` or `/optloop:start-loop`).
+- Keeps container count aligned with `loop.parallel_candidates`.
+- Optionally auto-starts one worker loop per container (`execution.auto_start_claude=true` by default).
+- Tracks runtime state, worker health, logs, and container process visibility.
+- Persists per-iteration history under `.optloop/history/<iteration>/`.
 
-## Runtime Model
+## Runtime Flow
 
-1. `optloop-launch` runs `optloop-init` and starts `optloop start` in the background.
-2. The runner loop:
+1. `optloop-launch` runs `optloop-init`, then starts `optloop start` in the background.
+2. Every loop iteration:
    - increments `iteration`,
-   - reconciles container count to `loop.parallel_candidates`,
-   - probes/starts Claude worker supervisors in each container,
-   - writes heartbeat and status.
-3. If worker supervisors are not healthy, phase is set to `runtime_degraded`.
+   - reconciles runtime containers,
+   - probes/starts container workers,
+   - writes status + live events,
+   - captures iteration history artifacts.
+3. If workers are not healthy, phase is `runtime_degraded`.
 
 Container naming:
 
 - Primary: `optloop-<repo-name>`
-- Additional: `optloop-<repo-name>-2`, `-3`, ...
+- Additional: `optloop-<repo-name>-2`, `optloop-<repo-name>-3`, ...
 
 ## Requirements
 
-- Host:
-  - `bash`
-  - `python3` or `python`
-  - Docker daemon reachable by current user
-- Worker image:
-  - Must contain Claude CLI (`claude`) and runtime deps.
-  - `plugins/optloop/docker/Dockerfile.example` installs `@anthropic-ai/claude-code`.
+Host:
 
-## Authentication And Settings
+- `bash`
+- `python3` or `python`
+- Docker daemon accessible by the current user
 
-Worker auth sources:
+Worker image:
 
-1. `ANTHROPIC_AUTH_TOKEN` from host env (via `execution.passthrough_env`).
-2. `ANTHROPIC_AUTH_TOKEN` and other `env` entries found in host settings file are injected as passthrough env.
-3. Claude login credentials inside container runtime home.
+- `claude` CLI available in container
+- runtime dependencies installed
+- reference image: `plugins/optloop/docker/Dockerfile.example`
 
-If missing, worker state becomes `auth_missing` and retries slowly instead of tight failing loops.
+## Authentication and Settings
 
-By default, runtime sync also copies host auth files when found (`copy_user_auth=true`):
+Primary auth path is `ANTHROPIC_AUTH_TOKEN`.
 
-- `.credentials.json`
-- `credentials.json`
-- `auth.json`
+Credential sources used by workers:
 
-Settings file behavior:
+1. Host env vars from `execution.passthrough_env`
+2. `env` entries read from host settings file and passed through
+3. Runtime home auth files (`auth.json`, `credentials.json`, etc.)
 
-- OptLoop auto-detects host settings file in this order:
-  1. `CLAUDE_SETTINGS_PATH` (if set)
-  2. `~/.claude/settings.json`
-  3. `~/.claude/setting.json`
-- Detected path is written to `execution.settings_host_path` (if not already set) and mounted read-only into container at `execution.settings_container_path` (default `/opt/optloop-home/.claude/settings.json`).
+Settings discovery order:
+
+1. `CLAUDE_SETTINGS_PATH`
+2. `~/.claude/settings.json`
+3. `~/.claude/setting.json`
+
+Detected settings path is written to `execution.settings_host_path` and mounted read-only to `execution.settings_container_path` (default `/opt/optloop-home/.claude/settings.json`).
 
 ## Commands
 
-### Plugin skill surface
+Plugin commands:
 
 - `/optloop:start-loop`
 - `/optloop:stop-loop`
@@ -73,7 +71,7 @@ Settings file behavior:
 - `/optloop:logs`
 - `/optloop:reset-workspace`
 
-### CLI surface
+CLI commands:
 
 ```bash
 optloop init
@@ -87,26 +85,40 @@ optloop logs tail
 optloop reset
 ```
 
-## Key Files In Target Repository
+## Files Written Under Target Repo
+
+State:
 
 - `.optloop/config.json`
 - `.optloop/status.json`
 - `.optloop/live.ndjson`
 - `.optloop/runner.pid`
 - `.optloop/STOP`
+
+Logs:
+
 - `.optloop/logs/controller.out`
 - `.optloop/logs/claude-worker-<container>.log`
+
+Per-iteration archive:
+
 - `.optloop/history/<iteration>/summary.json`
+- `.optloop/history/<iteration>/status.snapshot.json`
 - `.optloop/history/<iteration>/git.status.txt`
 - `.optloop/history/<iteration>/git.diff.patch`
 - `.optloop/history/<iteration>/git.diff.staged.patch`
-- `.optloop/runtime/home/.claude` (synced runtime template)
+- `.optloop/history/<iteration>/controller.tail.log` (if available)
+- `.optloop/history/<iteration>/worker-<container>.tail.log` (if available)
+
+Runtime pack:
+
+- `.optloop/runtime/home/.claude`
 - `.optloop/runtime/workers/*.pid`
 - `.optloop/runtime/claude_prompt.txt`
 
-## Important Config Knobs
+## Important Config
 
-`.optloop/config.json`:
+Example `.optloop/config.json` fields:
 
 ```json
 {
@@ -120,13 +132,14 @@ optloop reset
     "auto_start_claude": true,
     "claude_command": "claude",
     "claude_skip_permissions": true,
+    "auth_precheck_mode": "warn",
     "claude_restart_delay_sec": 15,
-    "claude_prompt": "",
     "settings_host_path": "",
     "settings_container_path": "/opt/optloop-home/.claude/settings.json",
     "passthrough_env": [
       "ANTHROPIC_AUTH_TOKEN",
-      "ANTHROPIC_BASE_URL"
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL"
     ]
   }
 }
@@ -134,26 +147,21 @@ optloop reset
 
 ## Observability
 
-- `optloop status` shows:
-  - supervisor summary table
-  - container table
-  - worker supervisor table
-  - detected Claude process table
-- `optloop logs latest` shows:
-  - `controller.out`
-  - tail of `live.ndjson`
-  - tail of each `claude-worker-*.log`
-- `optloop doctor` emits JSON diagnostics, including worker status and auth-related runtime signals.
+- `optloop status`: summary, containers, workers, and detected Claude processes
+- `accepted_total` / `rejected_total` are sourced from `.optloop-runtime/state.json` (`accepted_count` / `rejected_count`) with fallback to counting JSON files under `.optloop-runtime/accepted` and `.optloop-runtime/rejected`.
+- `active_candidates` is sourced from `.optloop-runtime/state.json.current_attempt`.
+- `optloop logs latest`: controller log + live events + worker log tails
+- `optloop doctor`: resolved settings/auth signals and runtime diagnostics
 
-## Current Scope And Boundaries
+Typical phases:
 
-- Outer layer behavior is deterministic supervision and runtime orchestration.
-- Repository-specific optimization decisions are executed by in-container Claude sessions and runtime instructions under `.optloop-runtime/`.
-- This plugin does not expose a separate hard-coded benchmark acceptance engine in outer Python code.
+- `runtime_active`
+- `runtime_degraded`
+- `stopped`
 
 ## Quick Start
 
-1. Install/update this plugin in Claude Code.
-2. In your target repository, run `/optloop:start-loop`.
+1. Install or update plugin in Claude Code.
+2. In target repo, run `/optloop:start-loop`.
 3. Check `/optloop:status` and `/optloop:logs`.
-4. If worker state is `auth_missing`, provide `ANTHROPIC_AUTH_TOKEN` (and provider base URL if needed) or login in runtime context, then restart loop.
+4. If `auth_missing` appears, provide `ANTHROPIC_AUTH_TOKEN` (and base URL/model env when needed), then restart the loop.
